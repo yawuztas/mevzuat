@@ -129,5 +129,11 @@ Yalnızca yeni/değişen dokümanları artımlı (incremental) olarak indeksleme
 
 ### 3. Çoklu Ajan Denetiminin Çalıştırılması (`2_agents_graph.py`)
 ```powershell
-.\venv\Scripts\python.exe -X utf8 2_agents_graph.py "data/3_yuklenici_talepleri/ikitelli_atakoy_metro/sinyalizasyon/alstom_atc_onboard_precision_stop_test_raporu.md"
+.\venv\Scripts\python.exe -X utf8 2_agents_graph.py "data/3_yuklenici_talepleri/ornek_proje/ornek_yuklenici_sure_uzatimi_ve_fiyat_farki_dilekcesi.txt"
 ```
+
+### 4. Görsel Denetim Stüdyosu (NiceGUI + Apache ECharts + Cytoscape.js)
+```powershell
+.\venv\Scripts\python.exe -X utf8 ui_app.py
+```
+Tarayıcıda `http://127.0.0.1:8080` üzerinden 4 sekmeye erişilir: Katman 1–3 Bilgi Ağacı ve canlı arama, Yazışma Soy Ağacı (`project_graph.db`) ve insan onayı kuyruğu, PDF/DOCX yükleyip canlı 6 düğümlü denetim izleme + `.docx` indirme ve Katman 1 Mevzuat Güncelleme Merkezi.

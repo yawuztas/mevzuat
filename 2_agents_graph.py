@@ -92,10 +92,11 @@ DOMAIN_SUBSYSTEM_MAP = {
     },
     "elektromekanik": {
         "sinyalizasyon_cbtc", "cer_gucu_ve_elektrifikasyon", "zayif_akim_ve_scada",
-        "havalandirma_ve_yangin_tvs", "asansor_ve_yuruyen_merdiven", "genel_rams_ve_emniyet"
+        "havalandirma_ve_yangin_tvs", "asansor_ve_yuruyen_merdiven", "genel_rams_ve_emniyet",
+        "genel_elektromekanik",
     },
     "insaat": {
-        "tunel_ve_kazilar", "demiryolu_ustyapi_ve_ray", "istasyon_kaba_ince"
+        "tunel_ve_kazilar", "demiryolu_ustyapi_ve_ray", "istasyon_kaba_ince", "genel_insaat",
     }
 }
 
