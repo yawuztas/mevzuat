@@ -1,0 +1,94 @@
+# ==========================================
+# InsaatAudit / Mevzuat .gitignore
+# ==========================================
+
+# 1. Ortam Değişkenleri ve Gizli Anahtarlar (ASLA PUSH EDİLMEMELİ)
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# 2. Python Sanal Ortamı ve Paketler
+venv/
+env/
+.venv/
+ENV/
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 3. Yerel Vektör Veritabanı ve Önbellekler (Büyük Boyut ve SQLite Kilitleri)
+vector_db/chroma.sqlite3
+vector_db/*-*-*-*-*/
+vector_db/ingested_manifest.json
+data/project_graph.db
+data/project_graph.db-*
+*.db-wal
+*.db-shm
+.cache/
+.pytest_cache/
+.cache_ocr/
+.cache_ocr_backup_old/
+**/.cache_ocr/
+**/.cache_ocr_backup_old/
+
+# 4. Ham PDF, DWG, Arşiv, Gizli Proje Evrakları ve Tahkim Dosyaları (Public Repo Koruması)
+*.pdf
+*.PDF
+*.dwg
+*.DWG
+*.html
+*.HTML
+*.rar
+*.zip
+*.7z
+hamdosyalar/
+**/hamdosyalar/
+ham_dosyalar/
+**/ham_dosyalar/
+_arsiv/
+**/_arsiv/
+TAHKİM/
+**/TAHKİM/
+tahkim/
+**/tahkim/
+
+# Katman 2 & Katman 3 Proje Verileri (yalnızca klasör iskeleti ve sentetik ornek_proje kalır)
+data/2_proje_evraklari/**
+!data/2_proje_evraklari/.gitkeep
+data/3_yuklenici_talepleri/**
+!data/3_yuklenici_talepleri/.gitkeep
+!data/3_yuklenici_talepleri/ornek_proje/
+!data/3_yuklenici_talepleri/ornek_proje/**
+
+# 5. Üretilen Raporlar ve Proje-Özel/Geçici Scriptler
+data/raporlar/*.md
+data/raporlar/*.docx
+data/raporlar/*.json
+!data/raporlar/.gitkeep
+GENEL_MEVZUAT_VE_STANDARTLAR_KONTROL_ENVANTERI.docx
+scripts/_tmp_*.py
+scripts/build_tahkim_uzman_mutalaasi_docx.py
+scripts/batch_audit_all_signaling.py
+scripts/generate_all_em_maintenance_report.py
+scripts/generate_maintenance_report.py
+scripts/process_kirazli_halkali_all.py
+scripts/process_musavirlik_docs.py
+scripts/search_manlift.py
+scripts/download_mevzuat.py
+
+# 6. İşletim Sistemi ve IDE Dosyaları
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+*.log
+
+_audit_log.txt
