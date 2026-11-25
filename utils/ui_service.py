@@ -328,27 +328,95 @@ def semantic_search_memory(
 def get_correspondence_graph(
     db_path: Optional[Path] = None,
     project_id: Optional[str] = None,
+    *,
+    cluster_doc_ids: Optional[List[str]] = None,
+    search_query: Optional[str] = None,
+    role_filter: Optional[str] = None,
+    only_pending: bool = False,
+    max_nodes: int = 120,
 ) -> Dict[str, Any]:
-    """SQLite project_graph.db üzerinden Cytoscape graf elemanları + onay kuyruğu verisi üretir."""
+    """
+    SQLite project_graph.db üzerinden Cytoscape graf elemanları, uyuşmazlık kümeleri ve onay kuyruğu üretir.
+    400+ yazışma içeren projelerde tarayıcıyı yormamak için küme/arama/taraf filtresi ve `max_nodes` tavanı uygular.
+    """
+    from utils.dispute_analyzer import discover_dispute_clusters
+    from utils.text_tr import tr_lower
+
     conn = connect(db_path)
     try:
-        if project_id and project_id != "Tümü":
+        eff_proj = None if (not project_id or project_id == "Tümü") else project_id
+        if eff_proj:
             doc_rows = conn.execute(
-                "SELECT * FROM documents WHERE project_id=? ORDER BY doc_date ASC, created_at ASC",
-                (project_id,),
+                "SELECT * FROM documents WHERE project_id=? ORDER BY COALESCE(doc_date, '9999-99-99') ASC, created_at ASC",
+                (eff_proj,),
             ).fetchall()
         else:
             doc_rows = conn.execute(
-                "SELECT * FROM documents ORDER BY doc_date ASC, created_at ASC"
+                "SELECT * FROM documents ORDER BY COALESCE(doc_date, '9999-99-99') ASC, created_at ASC"
             ).fetchall()
-        docs = [dict(r) for r in doc_rows]
-        doc_ids = {d["doc_id"] for d in docs}
+        all_docs = [dict(r) for r in doc_rows]
+        all_doc_ids = {d["doc_id"] for d in all_docs}
 
-        # Tüm etiketler ve durum geçmişi
+        # Uyuşmazlık kümeleri keşfi (0 LLM, anlık)
+        dispute_summary = discover_dispute_clusters(conn, project_id=eff_proj, include_singletons=True)
+
+        # Tüm etiketler
         tags_by_doc: Dict[str, List[str]] = defaultdict(list)
-        for tr in conn.execute("SELECT doc_id, tag_type, tag_value FROM tags").fetchall():
-            if tr["doc_id"] in doc_ids:
+        if all_doc_ids:
+            placeholders_all = ",".join("?" for _ in all_doc_ids)
+            for tr in conn.execute(
+                f"SELECT doc_id, tag_type, tag_value FROM tags WHERE doc_id IN ({placeholders_all})",
+                tuple(all_doc_ids),
+            ).fetchall():
                 tags_by_doc[tr["doc_id"]].append(f"{tr['tag_type']}:{tr['tag_value']}")
+
+        # Filtreleme: küme -> taraf -> onay bekleyen -> anahtar kelime araması
+        filtered_docs = list(all_docs)
+        if cluster_doc_ids is not None:
+            cset = set(cluster_doc_ids)
+            filtered_docs = [d for d in filtered_docs if d["doc_id"] in cset]
+        if role_filter and role_filter != "Tümü":
+            filtered_docs = [d for d in filtered_docs if (d.get("sender_role") or "") == role_filter]
+        if only_pending:
+            filtered_docs = [d for d in filtered_docs if d.get("review_status") == "pending_review"]
+        if search_query and search_query.strip():
+            q_low = tr_lower(search_query.strip())
+            matched = []
+            for d in filtered_docs:
+                hay = tr_lower(
+                    " ".join([
+                        d.get("doc_no") or "",
+                        d.get("doc_date") or "",
+                        d.get("subject") or "",
+                        d.get("summary") or "",
+                        d.get("ilgi_raw") or "",
+                        " ".join(tags_by_doc.get(d["doc_id"], [])),
+                    ])
+                )
+                if q_low in hay:
+                    matched.append(d)
+            filtered_docs = matched
+
+        total_matching = len(filtered_docs)
+        truncated = False
+        docs = filtered_docs
+        if max_nodes > 0 and len(filtered_docs) > max_nodes:
+            # 400+ yazıda en yüksek riskli kümelerin düğümlerini önceliklendirerek kes
+            prioritized_ids: List[str] = []
+            allowed_set = {d["doc_id"] for d in filtered_docs}
+            for cl in dispute_summary.get("clusters", []):
+                for did in cl["doc_ids"]:
+                    if did in allowed_set and did not in prioritized_ids:
+                        prioritized_ids.append(did)
+                        if len(prioritized_ids) >= max_nodes:
+                            break
+                if len(prioritized_ids) >= max_nodes:
+                    break
+            kept = set(prioritized_ids)
+            docs = [d for d in filtered_docs if d["doc_id"] in kept]
+            truncated = True
+
+        doc_ids = {d["doc_id"] for d in docs}
 
         links = []
         if doc_ids:
@@ -356,23 +424,23 @@ def get_correspondence_graph(
             links = [
                 dict(r)
                 for r in conn.execute(
-                    f"SELECT * FROM links WHERE from_doc_id IN ({placeholders})",
+                    f"SELECT * FROM links WHERE from_doc_id IN ({placeholders}) AND link_type IN ('ilgi_zinciri', 'cevaplar')",
                     tuple(doc_ids),
                 ).fetchall()
             ]
 
         history_rows = []
-        if doc_ids:
-            placeholders = ",".join("?" for _ in doc_ids)
+        if all_doc_ids:
+            placeholders = ",".join("?" for _ in all_doc_ids)
             history_rows = [
                 dict(r)
                 for r in conn.execute(
                     f"SELECT * FROM state_history WHERE doc_id IN ({placeholders}) ORDER BY changed_at DESC, history_id DESC",
-                    tuple(doc_ids),
+                    tuple(all_doc_ids),
                 ).fetchall()
             ]
 
-        pend_rows = pending_review(conn, project_id=None if (not project_id or project_id == "Tümü") else project_id)
+        pend_rows = pending_review(conn, project_id=eff_proj)
 
         elements: List[Dict[str, Any]] = []
         ghost_nodes_seen = set()
@@ -454,12 +522,81 @@ def get_correspondence_graph(
         return {
             "elements": elements,
             "documents": docs,
+            "total_in_project": len(all_docs),
+            "total_matching": total_matching,
+            "shown_docs": len(docs),
+            "truncated": truncated,
             "pending_review": pend_rows,
             "state_history": history_rows,
             "projects": projects_in_db,
+            "dispute_summary": dispute_summary,
         }
     finally:
         conn.close()
+
+
+def run_batch_history_ingest(
+    project_id: str,
+    source_dir: Optional[str] = None,
+    *,
+    organize: bool = False,
+    use_llm: bool = False,
+    db_path: Optional[Path] = None,
+    chroma_dir: Optional[Path] = None,
+    progress_cb: Optional[Callable[[int, int, str], None]] = None,
+) -> Dict[str, Any]:
+    """Karma veya düzenli bir klasördeki tüm yazışmaları ayrı Yazışma DB + SQLite'a topluca alır."""
+    spec = importlib.util.spec_from_file_location("ingest_history_ui", BASE_DIR / "ingest_history.py")
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    src_p = Path(source_dir.strip()) if (source_dir and source_dir.strip()) else None
+    return mod.ingest_project_history(
+        project_id,
+        source_dir=src_p,
+        organize=organize,
+        use_llm=use_llm,
+        db_path=db_path,
+        chroma_dir=chroma_dir,
+        progress_cb=progress_cb,
+    )
+
+
+def run_cluster_dispute_audit(
+    project_id: str,
+    cluster_doc_ids: List[str],
+    *,
+    cluster_title: str = "",
+    cluster_id: str = "K01",
+    db_path: Optional[Path] = None,
+    progress_cb: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """Seçili uyuşmazlık zincirini sözleşme/mevzuata göre toplu denetler."""
+    from utils.dispute_analyzer import audit_dispute_cluster
+
+    return audit_dispute_cluster(
+        project_id=project_id,
+        cluster_doc_ids=cluster_doc_ids,
+        cluster_title=cluster_title,
+        cluster_id=cluster_id,
+        db_path=db_path,
+        progress_cb=progress_cb,
+    )
+
+
+def build_dispute_matrix_export(
+    project_id: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Projedeki tüm uyuşmazlık kümelerinin anlık (0 LLM) Markdown ve Word (.docx) matrisini üretir."""
+    from utils.dispute_analyzer import build_project_dispute_matrix_markdown, discover_dispute_clusters
+
+    eff_proj = None if (not project_id or project_id == "Tümü") else project_id
+    disc = discover_dispute_clusters(project_id=eff_proj, db_path=db_path, include_singletons=True)
+    md = build_project_dispute_matrix_markdown(disc)
+    title = f"Uyuşmazlık Kümeleri Matrisi — {eff_proj or 'Tüm Projeler'}"
+    docx_bytes = build_docx_bytes_from_markdown(md, report_title=title)
+    return {"discovery": disc, "markdown": md, "docx_bytes": docx_bytes}
 
 
 def update_card_and_approve(

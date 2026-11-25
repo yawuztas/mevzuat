@@ -64,7 +64,7 @@ _RE_REF_NO = re.compile(
 )
 _RE_ILGI_TARIH = re.compile(r"(\d{1,2}\s*[./]\s*\d{1,2}\s*[./]\s*\d{2,4})|(\d{1,2}\s+[A-Za-zÇĞİÖŞÜçğıöşü]+\s+\d{4})")
 
-# Gönderen rolü ipuçları (klasör konvansiyonu birincil, bunlar yalnızca yedek)
+# Gönderen rolü ipuçları (klasör ipucu yoksa çoklu-sinyal sınıflandırıcı kullanılır)
 _ROLE_HINTS = {
     "contractor": ("yüklenici", "taahhüt", "müteahhit"),
     "administration": ("idare", "belediye", "bakanlık", "başkanlık"),
@@ -72,6 +72,234 @@ _ROLE_HINTS = {
 }
 
 _DATE_SETTINGS = {"DATE_ORDER": "DMY", "STRICT_PARSING": True}
+
+# Çoklu sinyal taraf/tür sınıflandırıcısı için desenler (proje-bağımsız, global kurallar)
+_RE_EBYS_ADMIN_DOCNO = re.compile(
+    r"(?i)\b(?:E-\d{6,9}-\d{2,4}(?:\.\d+)?|M\.\d{2}\.\d+\.|B\.\d{2}\.\d+\.|S\.\d{2}-\d{3,6})\b"
+)
+_RE_CONSULTANT_DOCNO = re.compile(
+    r"(?i)(?:^|[\s/.\-])(?:GD|MUS|KONT|CNS|PMO|DEN)[-/]\d{2,6}\b"
+)
+_RE_CONTRACTOR_DOCNO = re.compile(
+    r"(?i)(?:(?:[-/])(?:PM|YK|YUK|CNT)[-/]\d{2,6}\b|^[A-ZÇĞİÖŞÜ]{2,6}[-/](?:AS|JV|OG|TR)[-/])"
+)
+_RE_DATIVE_RECIPIENT = re.compile(
+    r"(?i)(?:müdürlüğüne|müdürlüğü'ne|mudurlugune|mudurlugu'ne|"
+    r"başkanlığına|başkanlığı'na|baskanligina|baskanligi'na|"
+    r"müşavirliğine|müşavirliği'ne|musavirligine|musavirligi'ne|"
+    r"danışmanlığına|danışmanlığı'na|danismanligina|"
+    r"kontrollüğüne|kontrollüğü'ne|kontrollugune|"
+    r"ortaklığına|ortaklığı'na|ortakligina|"
+    r"girişimine|girişimi'ne|girisimine|"
+    r"firmasına|firması'na|firmasina|"
+    r"a\.ş\.'?ne|ltd\.\s*şti\.'?ne|idare'?ye|yüklenici'?ye|yuklenici'?ye)\s*$"
+)
+_RE_JOINT_TITLE = re.compile(
+    r"(?i)\b(?:toplantı\s+tutanağı|toplanti\s+tutanagi|müşterek\s+tespit|musterek\s+tespit|"
+    r"yer\s+teslim\s+tutanağı|yer\s+teslim\s+tutanagi|geçici\s+kabul\s+tutanağı|"
+    r"kesin\s+kabul\s+tutanağı|iş\s+bitirme\s+tutanağı|saha\s+tespit\s+tutanağı|"
+    r"mutabakat\s+tutanağı|tespit\s+tutanağı)\b"
+)
+_RE_HAKEDIS_DOC = re.compile(
+    r"(?i)\b(?:hakediş\s+(?:özeti|raporu|icmali|kapağı)|yeşil\s+defter|metraj\s+icmali)\b"
+)
+
+
+def classify_sender_role_and_type(
+    md_text: str,
+    *,
+    filename: str = "",
+    doc_no: Optional[str] = None,
+    subject: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Klasör ipucu olmadan (karma klasörlerde) antet, muhatap yönü, evrak numarası,
+    imza/kapanış bloğu ve dosya adından gönderen tarafı ve belge türünü çoklu sinyalle tespit eder.
+
+    Döndürür:
+        {"sender_role": "contractor"|"administration"|"consultant"|"joint"|None,
+         "doc_type": "yuklenici_yazisi"|"idare_cevabi"|"musavir_yazisi"|"tutanak"|"hakedis",
+         "confidence": float (0.0..1.0),
+         "reasons": List[str]}
+    """
+    from utils.text_tr import ascii_fold, tr_lower
+
+    text = md_text or ""
+    head = text[:2000]
+    tail = text[-1600:] if len(text) > 1600 else text
+    # Sayfa 1 sonu (uzun ekli PDF'lerde üst yazının imzası sayfa 1-2'de olur)
+    page1_tail = text[max(0, min(len(text), 4000) - 1600):min(len(text), 4000)]
+    closing = page1_tail + "\n" + tail
+
+    head_fold = ascii_fold(head)
+    closing_fold = ascii_fold(closing)
+    fname_fold = ascii_fold(filename or "")
+    subj_fold = ascii_fold(subject or "")
+    docno_str = (doc_no or "").strip()
+
+    scores: Dict[str, float] = {
+        "contractor": 0.0,
+        "administration": 0.0,
+        "consultant": 0.0,
+        "joint": 0.0,
+    }
+    reasons: List[str] = []
+
+    # 1. Evrak numarası (en yüksek güvenilirlikli sinyal)
+    docno_probe = f"{docno_str} {filename or ''}"
+    if _RE_EBYS_ADMIN_DOCNO.search(docno_probe):
+        scores["administration"] += 4.5
+        reasons.append("evrak_no:EBYS/Idare")
+    if _RE_CONSULTANT_DOCNO.search(docno_probe):
+        scores["consultant"] += 4.0
+        reasons.append("evrak_no:Musavir")
+    if _RE_CONTRACTOR_DOCNO.search(docno_probe):
+        scores["contractor"] += 4.0
+        reasons.append("evrak_no:Yuklenici")
+
+    # 2. Üst yazı satırlarını antet vs muhatap olarak ayır
+    head_lines = [ln.strip(" #*-_|:") for ln in head.splitlines() if ln.strip(" #*-_|:")]
+    letterhead_lines: List[str] = []
+    recipient_lines: List[str] = []
+    for ln in head_lines[:24]:
+        ln_low = tr_lower(ln)
+        if re.match(r"^(?:kaynak|sayfa|---)", ln_low):
+            continue
+        if _RE_DATIVE_RECIPIENT.search(ln) or re.match(r"^(?:sayın|sayin|dağıtım|dagitim)\b", ln_low):
+            recipient_lines.append(ln)
+            continue
+        if len(letterhead_lines) < 8 and not re.match(r"^(?:say[ıi]|tarih|konu|ilgi)\s*[:\-]", ln_low):
+            letterhead_lines.append(ln)
+
+    lh_fold = ascii_fold("\n".join(letterhead_lines))
+    rc_fold = ascii_fold("\n".join(recipient_lines))
+
+    # Antet (gönderen) sinyalleri
+    has_tc_admin_lh = (
+        ("t.c." in lh_fold or "turkiye cumhuriyeti" in lh_fold or "buyuksehir" in lh_fold or "bakanligi" in lh_fold)
+        and any(k in lh_fold for k in ("belediye", "bakanli", "mudurlug", "baskanli", "rayli sistem", "altyapi", "valilig"))
+    )
+    if has_tc_admin_lh:
+        scores["administration"] += 4.5
+        reasons.append("antet:T.C./Idare")
+
+    if any(k in lh_fold for k in ("musavir", "danisman", "kontrolluk", "proje kontrol", "emay", "yuksel proje", "prota", "systra", "egis", "tumas")):
+        scores["consultant"] += 4.0
+        reasons.append("antet:Musavir/Kontrolluk")
+
+    if any(k in lh_fold for k in ("ortak girisim", "adi ortakl", "konsorsiyum", "yuklenici", "taahhut", "insaat", "alstom", "siemens", "thales", "hitachi", "a.s.", "ltd.")):
+        # Müşavir şirket adı da A.Ş. içerebileceğinden müşavir anteti yoksa yükleniciye yaz
+        if not any(k in lh_fold for k in ("musavir", "danisman", "kontrolluk")):
+            scores["contractor"] += 3.0
+            reasons.append("antet:Yuklenici/Firma")
+
+    # Muhatap (alıcı) yönü sinyalleri — muhatap olan taraf gönderen değildir
+    if any(k in rc_fold for k in ("belediye", "baskanligina", "mudurlugune", "rayli sistem", "idareye", "bakanligina")):
+        if not has_tc_admin_lh:
+            scores["administration"] -= 3.0
+            scores["contractor"] += 1.0
+            reasons.append("muhatap:Idare")
+    if any(k in rc_fold for k in ("musavirligine", "danismanligina", "kontrollugune", "proje kontrol")):
+        scores["consultant"] -= 2.5
+        if not has_tc_admin_lh:
+            scores["contractor"] += 1.5
+        reasons.append("muhatap:Musavir")
+    if any(k in rc_fold for k in ("ortak girisimine", "adi ortakligina", "yukleniciye", "firmasina", "a.s.'ne", "a.s.ne", "konsorsiyum")):
+        scores["contractor"] -= 3.0
+        if not has_tc_admin_lh:
+            scores["consultant"] += 1.0
+        else:
+            scores["administration"] += 1.0
+        reasons.append("muhatap:Yuklenici")
+
+    # 3. İmza ve bürokratik kapanış bloğu
+    if any(k in closing_fold for k in ("baskan a.", "daire baskani", "sube muduru", "genel sekreter", "belediye baskani", "idare yetkilisi")):
+        scores["administration"] += 3.5
+        reasons.append("imza:Idare")
+    if any(k in closing_fold for k in ("5070 sayili elektronik imza", "elektronik imza ile imzalanmistir", "e-imzalidir")) and has_tc_admin_lh:
+        scores["administration"] += 1.5
+        reasons.append("imza:e-imza")
+    if any(k in closing_fold for k in ("kontrol amiri", "kontrolluk teskilat", "musavir proje muduru", "musavirlik")):
+        scores["consultant"] += 3.0
+        reasons.append("imza:Musavir")
+    if any(k in closing_fold for k in ("yuklenici yetkilisi", "ortak girisimi", "proje direktoru")) and "musavir" not in closing_fold:
+        scores["contractor"] += 2.0
+        reasons.append("imza:Yuklenici")
+
+    has_arz = bool(re.search(r"\barz\s+eder(?:im|iz)\b", closing_fold))
+    has_rica = bool(re.search(r"\brica\s+eder(?:im|iz)\b", closing_fold))
+    if has_arz and not has_rica:
+        scores["contractor"] += 1.2
+        scores["consultant"] += 0.6
+        reasons.append("kapanis:arz")
+    elif has_rica and not has_arz:
+        scores["administration"] += 1.5
+        scores["consultant"] += 0.8
+        reasons.append("kapanis:rica")
+
+    # 4. Ortak Tutanak & Hakediş tespiti
+    is_formal_letter = bool(recipient_lines) or has_arz or has_rica
+    has_joint_title = bool(_RE_JOINT_TITLE.search(head) or "tutanak" in fname_fold or "tutanak" in subj_fold)
+    if has_joint_title and not is_formal_letter:
+        scores["joint"] += 6.5
+        reasons.append("tur:OrtakTutanak")
+        if all(k in closing_fold for k in ("idare", "yuklenici")):
+            scores["joint"] += 2.0
+            reasons.append("imza:CokTarafliTutanak")
+    elif _RE_JOINT_TITLE.search(head) and all(k in closing_fold for k in ("idare", "yuklenici")):
+        scores["joint"] += 6.0
+        reasons.append("imza:CokTarafliTutanak")
+
+    # 5. Dosya adı ipuçları (ikincil destek)
+    if any(k in fname_fold for k in ("musavir", "danisman", "kontrolluk")):
+        scores["consultant"] += 2.5
+        reasons.append("dosya_adi:Musavir")
+    if any(k in fname_fold for k in ("idare", "ibb", "belediye", "olur", "baskanlik")):
+        scores["administration"] += 2.0
+        reasons.append("dosya_adi:Idare")
+    if any(k in fname_fold for k in ("yuklenici", "yuk_", "alstom", "dilekce")):
+        scores["contractor"] += 2.0
+        reasons.append("dosya_adi:Yuklenici")
+
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    best_role, best_score = ranked[0]
+    second_score = ranked[1][1]
+    margin = best_score - second_score
+
+    if best_score < 1.0:
+        detected_role: Optional[str] = None
+        role_conf = 0.0
+    else:
+        detected_role = best_role
+        if best_score >= 4.5 and margin >= 2.5:
+            role_conf = 0.95
+        elif best_score >= 3.0 and margin >= 1.5:
+            role_conf = 0.88
+        elif best_score >= 2.0 and margin >= 0.8:
+            role_conf = 0.68
+        else:
+            role_conf = 0.45
+
+    # Belge türü eşlemesi
+    if _RE_HAKEDIS_DOC.search(head) and not is_formal_letter:
+        detected_type = "hakedis"
+    elif "hakedis" in fname_fold and not is_formal_letter:
+        detected_type = "hakedis"
+    elif detected_role == "joint":
+        detected_type = "tutanak"
+    elif detected_role == "administration":
+        detected_type = "idare_cevabi"
+    elif detected_role == "consultant":
+        detected_type = "musavir_yazisi"
+    else:
+        detected_type = "yuklenici_yazisi"
+
+    return {
+        "sender_role": detected_role,
+        "doc_type": detected_type,
+        "confidence": round(role_conf, 3),
+        "reasons": reasons,
+    }
 
 
 def parse_tr_date(raw: str, default_year: Optional[int] = None) -> Tuple[Optional[str], float]:
@@ -110,6 +338,37 @@ def _guess_sender_role(md_text: str) -> Tuple[Optional[str], float]:
     if scores[best] == 0:
         return None, 0.0
     return best, min(0.5, 0.2 + 0.15 * scores[best])
+
+
+def _extract_clean_summary(md_text: str, max_chars: int = 420) -> str:
+    """Antet/Tarih/Sayı/Sayfa başlıklarını atlayıp yazının gerçek gövde paragrafından özet çıkarır."""
+    if not md_text:
+        return ""
+    body_lines: List[str] = []
+    started = False
+    for raw_ln in md_text.splitlines():
+        ln = raw_ln.strip()
+        if not ln:
+            continue
+        low = ln.lower()
+        if ln.startswith("#") and ("kaynak:" in low or "sayfa " in low or "---" in low):
+            continue
+        if not started:
+            if re.match(r"^(?:tarih|say[ıi1l]|konu|[iıİ]lgi|ref(?:erans)?|evrak\s*no|dağıtım|dagitim)\s*[:\-]", low):
+                continue
+            if _RE_DATIVE_RECIPIENT.search(ln) or re.match(r"^(?:t\.c\.|sayın|sayin)\b", low):
+                continue
+            # Tümü büyük harfli kısa antet satırlarını atla
+            if len(ln) <= 75 and ln == ln.upper() and not re.search(r"[.?!]", ln):
+                continue
+            started = True
+        body_lines.append(ln)
+        if sum(len(x) + 1 for x in body_lines) >= max_chars:
+            break
+    joined = re.sub(r"\s+", " ", " ".join(body_lines)).strip()
+    if len(joined) < 25:
+        joined = re.sub(r"\s+", " ", md_text[:max_chars]).strip()
+    return joined[:max_chars]
 
 
 def _evidence_weight_for(sender_role: Optional[str], doc_type: str) -> str:
@@ -302,15 +561,35 @@ def extract_card_regex(
         spans.append({"field": "subject", **_span(m)})
         subject = m.group(1).strip()
 
-    # --- Gönderen rolü ---
+    # --- Gönderen rolü ve belge türü ---
+    role_reasons: List[str] = []
     if sender_role_hint:
         sender_role, role_conf = sender_role_hint, 1.0
+        effective_doc_type = doc_type if doc_type and doc_type != "auto" else (
+            "idare_cevabi" if sender_role == "administration"
+            else ("musavir_yazisi" if sender_role == "consultant"
+                  else ("tutanak" if sender_role == "joint" else "yuklenici_yazisi"))
+        )
     else:
-        sender_role, role_conf = _guess_sender_role(md_text)
+        cls = classify_sender_role_and_type(
+            md_text,
+            filename=filename,
+            doc_no=doc_no,
+            subject=subject,
+        )
+        sender_role = cls["sender_role"]
+        role_conf = cls["confidence"]
+        role_reasons = cls["reasons"]
+        effective_doc_type = cls["doc_type"] if doc_type in (None, "", "auto") else doc_type
     confidences.append(role_conf)
 
     confidence = round(sum(confidences) / len(confidences), 3) if confidences else 0.0
-    auto = bool(doc_date and doc_no and sender_role_hint and date_conf >= 1.0)
+    auto = bool(
+        doc_date
+        and doc_no
+        and sender_role
+        and ((sender_role_hint and date_conf >= 1.0) or (role_conf >= 0.85 and date_conf >= 0.9))
+    )
 
     return {
         "card": {
@@ -319,14 +598,15 @@ def extract_card_regex(
             "subject": subject,
             "ilgi_raw": ilgi_raw,
             "sender_role": sender_role,
-            "doc_type": doc_type,
-            "evidence_weight": _evidence_weight_for(sender_role, doc_type),
+            "doc_type": effective_doc_type,
+            "evidence_weight": _evidence_weight_for(sender_role, effective_doc_type),
             "review_status": "auto_approved" if auto else "pending_review",
             "extraction_confidence": confidence,
-            "summary": (md_text[:200].replace("\n", " ").strip()),
+            "summary": _extract_clean_summary(md_text),
         },
         "spans": spans,
         "ilgi_refs": ilgi_refs,
+        "role_reasons": role_reasons,
     }
 
 
@@ -340,7 +620,7 @@ def enrich_with_instructor(md_text: str, max_chars: int = 20000) -> Tuple[Option
         import google.genai as genai
         from pydantic import BaseModel, Field
 
-        from utils.config import GOOGLE_API_KEY
+        from utils.config import GOOGLE_API_KEY, GOOGLE_MODEL_NAME
 
         if not GOOGLE_API_KEY:
             return None, "GOOGLE_API_KEY tanımlı değil — zenginleştirme atlandı (deterministik alanlar geçerli)."
@@ -355,7 +635,7 @@ def enrich_with_instructor(md_text: str, max_chars: int = 20000) -> Tuple[Option
         try:
             i_client = instructor.from_genai(client=client, mode=instructor.Mode.GENAI_STRUCTURED_OUTPUTS)
             enriched = i_client.chat.completions.create(
-                model="gemini-3.5-flash-lite",
+                model=GOOGLE_MODEL_NAME,
                 messages=[{"role": "user", "content": md_text[:max_chars]}],
                 response_model=CardEnrichment,
             )
@@ -363,7 +643,7 @@ def enrich_with_instructor(md_text: str, max_chars: int = 20000) -> Tuple[Option
             # Yapılandırılmış çıktı modu bu modelde desteklenmiyorsa araç çağrısı modu
             i_client = instructor.from_genai(client=client, mode=instructor.Mode.GENAI_TOOLS)
             enriched = i_client.chat.completions.create(
-                model="gemini-3.5-flash-lite",
+                model=GOOGLE_MODEL_NAME,
                 messages=[{"role": "user", "content": md_text[:max_chars]}],
                 response_model=CardEnrichment,
             )
@@ -382,7 +662,7 @@ def extract_evidence_spans_llm(md_text: str, max_chars: int = 30000) -> Tuple[Op
     try:
         import langextract as lx
 
-        from utils.config import GOOGLE_API_KEY
+        from utils.config import GOOGLE_API_KEY, GOOGLE_MODEL_NAME
 
         if not GOOGLE_API_KEY:
             return None, "GOOGLE_API_KEY tanımlı değil — span çıkarımı atlandı."
@@ -404,7 +684,7 @@ def extract_evidence_spans_llm(md_text: str, max_chars: int = 30000) -> Tuple[Op
                 "poz_atifi (Poz X.XX), iddia (yüklenicinin doğrulanmaya muhtaç temel cümlesi)."
             ),
             examples=examples,
-            model_id="gemini-3.5-flash-lite",
+            model_id=GOOGLE_MODEL_NAME,
             api_key=GOOGLE_API_KEY,
             # Kota/RPM güvenliği: varsayılan buffer (1000) uzun dilekçede 15-20
             # istek atar; 4000 + 2 işçi + sessiz ilerleme çok daha ekonomiktir.

@@ -41,7 +41,8 @@ pip install -r requirements.txt
 cp .env.example .env                                              # add GOOGLE_API_KEY or ANTHROPIC_API_KEY
 
 python 1_ingest.py                                                # ingest Layer 1 + Layer 2 into vector_db/
-python ingest_history.py --project <project_id>                   # ingest Layer 3 letters into vector_db_yazismalar/ + project_graph.db
+python ingest_history.py --project <project_id> --source-dir <dir> # smart mixed-folder party classifier -> vector_db_yazismalar/ + project_graph.db
+python scripts/analyze_disputes.py --project <project_id>          # discover dispute clusters & export 0-LLM overview matrix
 python 2_agents_graph.py <petition.pdf> --project <project_id>    # run 6-node multi-agent audit
 python ui_app.py                                                  # launch visual studio on http://127.0.0.1:8080
 ```

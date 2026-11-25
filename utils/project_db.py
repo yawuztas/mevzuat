@@ -221,7 +221,9 @@ def iter_chain(
     yalnızca bir kez döner, başlangıç belgesi zincire geri sızmaz.
     Döndürür: zincir sırasındaki kart sözlükleri (yeni -> eski yönünde).
     """
-    types = tuple(link_types) if link_types else (link_type,)
+    types = tuple(link_types) if link_types else (
+        ("ilgi_zinciri", "cevaplar") if link_type == "ilgi_zinciri" else (link_type,)
+    )
     placeholders = ",".join("?" for _ in types)
     rows = conn.execute(
         f"""
@@ -439,19 +441,30 @@ def match_doc_no_in_project(
             if cand and cand.get("doc_date") in ilgi_dates:
                 return cand
 
-    # 4) Ayıraç normalize (ATI/AS/TR/PM/4236 == ATi-AS-TR-PM-4236) ve segment son eki (.S.21-2202 -> S.21-2202)
+    # 4) Ayıraç normalize (ATI/AS/TR/PM/4236 == ATi-AS-TR-PM-4236) ve segment son eki
+    #    (hem tam: .S.21-2202 -> S.21-2202, hem OCR iskeletli: .S.23-401 <-> 5.23-401)
     def _norm_sep(val: str) -> str:
         s = val.replace("i", "I").replace("İ", "I").upper().strip()
         return re.sub(r"[-./_\s]+", "-", s).strip("-")
 
+    def _norm_skel_sep(val: str) -> str:
+        segs = [s for s in re.split(r"[-./_\s]+", (val or "").strip()) if s]
+        return "-".join(_ocr_docno_skeleton(s) for s in segs)
+
     ref_sep = _norm_sep(ref)
+    ref_skel_sep = _norm_skel_sep(ref)
     if len(ref_sep) >= 4:
         suffix_hits = []
         for r in rows:
             d_sep = _norm_sep(r["doc_no"])
             if d_sep == ref_sep:
                 return get_document(conn, r["doc_id"])
-            if d_sep.endswith("-" + ref_sep) or ref_sep.endswith("-" + d_sep):
+            d_skel_sep = _norm_skel_sep(r["doc_no"])
+            if (
+                d_sep.endswith("-" + ref_sep)
+                or ref_sep.endswith("-" + d_sep)
+                or (len(ref_skel_sep) >= 5 and (d_skel_sep == ref_skel_sep or d_skel_sep.endswith("-" + ref_skel_sep) or ref_skel_sep.endswith("-" + d_skel_sep)))
+            ):
                 if not ilgi_dates or not r["doc_date"] or r["doc_date"] in ilgi_dates:
                     suffix_hits.append(r)
         # Çıplak sayısal son ekte yalnızca tarih teyitli veya tekil aday varsa bağla

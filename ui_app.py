@@ -23,6 +23,7 @@ if str(BASE_DIR) not in sys.path:
 from utils.project_db import VALID_STATES  # noqa: E402
 from utils.ui_service import (  # noqa: E402
     NODE_LABELS,
+    build_dispute_matrix_export,
     build_docx_bytes_from_markdown,
     get_correspondence_graph,
     get_document_chunks,
@@ -31,6 +32,8 @@ from utils.ui_service import (  # noqa: E402
     list_known_projects,
     list_sample_petitions,
     run_audit_streaming,
+    run_batch_history_ingest,
+    run_cluster_dispute_audit,
     run_legislation_check,
     run_legislation_sync,
     save_uploaded_petition,
@@ -435,22 +438,63 @@ def main_page() -> None:
                     sub_chart.update()
 
             # ==================================================================
-            # SEKME 2: YAZIŞMA SOY AĞACI & ONAY KUYRUĞU (Cytoscape + SQLite)
+            # SEKME 2: YAZIŞMA SOY AĞACI, UYUŞMAZLIK KÜMELERİ & ONAY KUYRUĞU
             # ==================================================================
             with ui.tab_panel(tab_corr).classes("p-0 gap-4"):
-                corr_state: Dict[str, Any] = {"selected_doc_id": None}
+                corr_state: Dict[str, Any] = {
+                    "selected_doc_id": None,
+                    "clusters": [],
+                    "selected_cluster_id": "ALL",
+                    "cluster_report_md": "",
+                    "cluster_report_title": "",
+                    "batch_q": queue.Queue(),
+                    "batch_running": False,
+                    "cluster_q": queue.Queue(),
+                    "cluster_running": False,
+                }
 
-                with ui.row().classes("surface-panel w-full p-3 items-center justify-between gap-3"):
-                    with ui.row().classes("items-center gap-3"):
-                        ui.label("Proje Yazışma Çizgesi (project_graph.db)").classes("text-base font-semibold text-[#102C57]")
-                        corr_proj_select = ui.select(["Tümü"] + known_projects, value="Tümü", label="Proje Filtresi").props("outlined dense").classes("w-56")
-                    with ui.row().classes("items-center gap-2"):
-                        ui.badge("Yüklenici", color="blue").props("outline")
-                        ui.badge("İdare", color="teal").props("outline")
-                        ui.badge("Müşavir", color="amber").props("outline")
-                        ui.badge("İnsan Onayı Bekliyor", color="red").props("outline")
-                        ui.button("Çizgeyi Yenile", icon="refresh", on_click=lambda: refresh_corr_tab()).props("flat dense color=primary")
+                # Üst Kontrol & Filtreleme Çubuğu (400+ yazışma için hızlı filtreler)
+                with ui.column().classes("surface-panel w-full p-3 gap-2"):
+                    with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
+                        with ui.row().classes("items-center gap-2 flex-wrap"):
+                            ui.label("Proje Yazışma Çizgesi & Uyuşmazlık Kümeleri").classes("text-base font-semibold text-[#102C57]")
+                            corr_proj_select = ui.select(
+                                ["Tümü"] + known_projects,
+                                value="ikitelli_atakoy_metro" if "ikitelli_atakoy_metro" in known_projects else "Tümü",
+                                label="Proje",
+                            ).props("outlined dense").classes("w-48")
+                            corr_cluster_select = ui.select(
+                                {"ALL": "Tüm Kümeler (En Kritik 120)"},
+                                value="ALL",
+                                label="Uyuşmazlık Kümesi",
+                            ).props("outlined dense").classes("w-72")
+                            corr_role_select = ui.select(
+                                {
+                                    "Tümü": "Tüm Taraflar",
+                                    "contractor": "Yüklenici",
+                                    "administration": "İdare",
+                                    "consultant": "Müşavir",
+                                    "joint": "Ortak Tutanak",
+                                },
+                                value="Tümü",
+                                label="Taraf",
+                            ).props("outlined dense").classes("w-36")
+                            corr_search_input = ui.input("Sayı / Konu / Standart ara...").props("outlined dense clearable").classes("w-52")
+                            corr_only_pending = ui.switch("Sadece Onay Bekleyen").classes("text-xs text-slate-700")
+                        with ui.row().classes("items-center gap-2"):
+                            btn_open_batch = ui.button("Klasörden Toplu Yazışma Al", icon="folder_open").props("unelevated color=secondary dense")
+                            btn_export_matrix = ui.button("Özet Matris (.docx)", icon="table_view").props("outline color=primary dense")
+                            ui.button("Yenile", icon="refresh", on_click=lambda: refresh_corr_tab()).props("flat dense color=primary")
 
+                    with ui.row().classes("w-full items-center justify-between gap-2"):
+                        corr_status_banner = ui.label("Henüz yazışma yüklenmedi.").classes("text-xs text-slate-600")
+                        with ui.row().classes("items-center gap-1.5"):
+                            ui.badge("Yüklenici", color="blue").props("outline")
+                            ui.badge("İdare", color="teal").props("outline")
+                            ui.badge("Müşavir", color="amber").props("outline")
+                            ui.badge("Onay Bekliyor", color="red").props("outline")
+
+                # Cytoscape Çizgesi + Sağ Seçili Kart Editörü
                 with ui.row().classes("w-full gap-4 items-stretch"):
                     with ui.column().classes("surface-panel p-3 flex-[1.4] min-w-[520px]"):
                         ui.html('<div id="cy_correspondence" style="width:100%;height:460px;background:#FAFBFC;border:1px solid #E2E8F0;border-radius:6px;"></div>').classes("w-full")
@@ -465,6 +509,72 @@ def main_page() -> None:
                         ed_meta_lbl = ui.label("").classes("text-xs text-slate-600 whitespace-pre-wrap")
                         ed_summary_box = ui.label("").classes("text-xs bg-slate-50 border border-slate-200 rounded p-2 w-full max-h-28 overflow-auto")
                         btn_approve = ui.button("Değişiklikleri Kaydet & İnsan Onayı Ver", icon="verified").props("unelevated color=primary").classes("w-full")
+
+                # Uyuşmazlık Kümeleri Tablosu + Toplu Zincir Denetimi
+                with ui.column().classes("surface-panel w-full p-4 gap-2"):
+                    with ui.row().classes("w-full items-center justify-between flex-wrap gap-2"):
+                        clusters_title = ui.label("Keşfedilen Uyuşmazlık Kümeleri (0 Küme)").classes("text-sm font-semibold text-[#102C57]")
+                        with ui.row().classes("items-center gap-2"):
+                            btn_show_all_clusters = ui.button("Tümünü Göster", icon="filter_alt_off").props("flat dense color=primary")
+                            btn_audit_cluster = ui.button(
+                                "Seçili Zinciri Sözleşmeye Göre Denetle",
+                                icon="gavel",
+                            ).props("unelevated color=primary dense")
+                            btn_audit_cluster.disable()
+                    cluster_audit_status = ui.label("Bir uyuşmazlık kümesine tıkladığınızda yukarıdaki çizge yalnız o konuya odaklanır; dilerseniz zincirin tamamını tek raporda sözleşmeye göre denetleyebilirsiniz.").classes("text-xs text-slate-500")
+                    clusters_table = ui.table(
+                        columns=[
+                            {"name": "cluster_id", "label": "Küme", "field": "cluster_id", "align": "left"},
+                            {"name": "title", "label": "Konu / Başlık", "field": "title", "align": "left"},
+                            {"name": "doc_count", "label": "Yazı", "field": "doc_count", "align": "right"},
+                            {"name": "date_range", "label": "Tarih Aralığı", "field": "date_range", "align": "left"},
+                            {"name": "party_summary", "label": "Y/İ/M/T", "field": "party_summary", "align": "left"},
+                            {"name": "unanswered_count", "label": "Cevapsız", "field": "unanswered_count", "align": "right"},
+                            {"name": "missing_refs_count", "label": "Eksik İlgi", "field": "missing_refs_count", "align": "right"},
+                            {"name": "risk_badge", "label": "Risk", "field": "risk_badge", "align": "left"},
+                            {"name": "signals_text", "label": "Uyuşmazlık Sinyalleri", "field": "signals_text", "align": "left"},
+                        ],
+                        rows=[],
+                        row_key="cluster_id",
+                        selection="single",
+                        pagination=8,
+                    ).props("dense flat wrap-cells").classes("w-full")
+
+                # Toplu Zincir Denetim Raporu Diyaloğu
+                with ui.dialog() as cluster_report_dialog, ui.card().classes("w-[960px] max-w-[95vw] p-4 gap-3"):
+                    with ui.row().classes("w-full items-center justify-between"):
+                        cluster_rep_header = ui.label("Toplu Uyuşmazlık Zincir Raporu").classes("text-base font-semibold text-[#102C57]")
+                        with ui.row().classes("gap-2"):
+                            btn_cl_dl_docx = ui.button("Word (.docx)", icon="download").props("unelevated color=secondary dense")
+                            btn_cl_dl_md = ui.button("Markdown (.md)", icon="article").props("outline color=primary dense")
+                            ui.button(icon="close", on_click=cluster_report_dialog.close).props("flat round dense")
+                    with ui.scroll_area().classes("w-full h-[65vh] border border-slate-200 rounded p-4 bg-white"):
+                        cluster_rep_md = ui.markdown("").classes("report-markdown w-full")
+
+                # Klasörden Toplu Yazışma Al Diyaloğu
+                with ui.dialog() as batch_dialog, ui.card().classes("w-[620px] max-w-[95vw] p-5 gap-3"):
+                    ui.label("Akıllı Karma Klasörden Toplu Yazışma Al (ingest_history)").classes("text-base font-semibold text-[#102C57]")
+                    ui.label(
+                        "400+ karışık yazışmayı (Yüklenici, İdare, Müşavir, Tutanak) tek klasörden doğrudan okuyup "
+                        "antet ve evrak numarasından tarafı otomatik ayırır; yalnızca data/project_graph.db ve "
+                        "vector_db_yazismalar/ içine yazar (sabit şartname DB'sine dokunmaz)."
+                    ).classes("text-xs text-slate-600")
+                    batch_proj_sel = ui.select(
+                        known_projects or ["ikitelli_atakoy_metro"],
+                        value="ikitelli_atakoy_metro" if "ikitelli_atakoy_metro" in known_projects else (known_projects[0] if known_projects else "ikitelli_atakoy_metro"),
+                        label="Hedef Proje",
+                    ).props("outlined dense").classes("w-full")
+                    batch_dir_input = ui.input(
+                        "Karma Yazışma Klasör Yolu (ör. C:\\Users\\...\\sinyal_405 veya boş bırakırsanız proje klasörü taranır)"
+                    ).props("outlined dense").classes("w-full")
+                    batch_organize_chk = ui.checkbox(
+                        "Orijinal dosyaları silmeden taraf/yıl klasörlerine kopyalayarak düzenle (--organize)",
+                        value=False,
+                    )
+                    batch_progress_lbl = ui.label("Hazır.").classes("text-xs font-medium text-teal-700")
+                    with ui.row().classes("w-full justify-end gap-2"):
+                        ui.button("Kapat", on_click=batch_dialog.close).props("flat")
+                        btn_run_batch = ui.button("Toplu İndekslemeyi Başlat", icon="play_arrow").props("unelevated color=primary")
 
                 with ui.row().classes("w-full gap-4 items-stretch"):
                     with ui.column().classes("surface-panel p-4 flex-1 gap-2"):
@@ -536,8 +646,10 @@ def main_page() -> None:
                             confirmed_by_human=True,
                         )
                         msg = "Kart insan onayıyla kaydedildi"
+                        if res.get("relinked"):
+                            msg += f", {res['relinked']} İlgi bağlantısı çözüldü"
                         if res["state_changed"]:
-                            msg += f" ve durum '{ed_state.value}' olarak güncellendi."
+                            msg += f" ve durum '{ed_state.value}' oldu."
                         ui.notify(msg, type="positive")
                         await refresh_corr_tab()
                     except Exception as exc:
@@ -545,18 +657,257 @@ def main_page() -> None:
 
                 btn_approve.on_click(save_approval_click)
 
-                async def refresh_corr_tab() -> None:
-                    sel_p = corr_proj_select.value
-                    g = get_correspondence_graph(project_id=None if sel_p == "Tümü" else sel_p)
-                    pend_table.rows = g["pending_review"]
-                    pend_table.update()
-                    pend_title.text = f"İnsan Onayı Bekleyenler ({len(g['pending_review'])})"
-                    hist_table.rows = g["state_history"]
-                    hist_table.update()
-                    elem_json = json.dumps(g["elements"], ensure_ascii=False)
-                    await ui.run_javascript(f"window.renderCorrespondenceGraph('cy_correspondence', {elem_json});")
+                async def refresh_corr_tab(reset_cluster: bool = False) -> None:
+                    if corr_state.get("updating_ui"):
+                        return
+                    corr_state["updating_ui"] = True
+                    try:
+                        sel_p = corr_proj_select.value
+                        if reset_cluster:
+                            corr_state["selected_cluster_id"] = "ALL"
+                            corr_cluster_select.value = "ALL"
 
-                corr_proj_select.on_value_change(lambda _: refresh_corr_tab())
+                        chosen_cid = corr_cluster_select.value or "ALL"
+                        corr_state["selected_cluster_id"] = chosen_cid
+                        target_doc_ids = None
+                        if chosen_cid != "ALL":
+                            found_cl = next((c for c in corr_state["clusters"] if c["cluster_id"] == chosen_cid), None)
+                            if found_cl:
+                                target_doc_ids = found_cl["doc_ids"]
+
+                        g = get_correspondence_graph(
+                            project_id=None if sel_p == "Tümü" else sel_p,
+                            cluster_doc_ids=target_doc_ids,
+                            search_query=corr_search_input.value or None,
+                            role_filter=corr_role_select.value or "Tümü",
+                            only_pending=bool(corr_only_pending.value),
+                            max_nodes=120,
+                        )
+
+                        disc = g.get("dispute_summary") or {}
+                        clusters = disc.get("clusters") or []
+                        corr_state["clusters"] = clusters
+
+                        # Küme dropdown seçeneklerini güncelle
+                        cl_opts = {"ALL": f"Tüm Kümeler (En Kritik 120 / {disc.get('total_docs', 0)} yazı)"}
+                        cl_rows = []
+                        for c in clusters:
+                            cl_opts[c["cluster_id"]] = f"{c['cluster_id']} · {c['title'][:38]} ({c['doc_count']} yazı · {c['risk_level']})"
+                            dr = f"{c['date_start']} → {c['date_end']}" if c["date_start"] != c["date_end"] else c["date_start"]
+                            cl_rows.append({
+                                "cluster_id": c["cluster_id"],
+                                "title": c["title"],
+                                "doc_count": c["doc_count"],
+                                "date_range": dr,
+                                "party_summary": c["party_summary"],
+                                "unanswered_count": c["unanswered_count"],
+                                "missing_refs_count": c["missing_refs_count"],
+                                "risk_badge": f"{c['risk_level']} ({c['risk_score']})",
+                                "signals_text": ", ".join(c["dispute_signals"][:3]) or "-",
+                            })
+                        corr_cluster_select.options = cl_opts
+                        if chosen_cid not in cl_opts:
+                            corr_cluster_select.value = "ALL"
+                            corr_state["selected_cluster_id"] = "ALL"
+                        corr_cluster_select.update()
+
+                        clusters_table.rows = cl_rows
+                        clusters_table.update()
+                        clusters_title.text = (
+                            f"Keşfedilen Uyuşmazlık Kümeleri ({len(clusters)} Küme · "
+                            f"Çoklu Zincir: {disc.get('multi_doc_cluster_count', 0)} · "
+                            f"Yüksek Risk: {disc.get('high_risk_count', 0)} · "
+                            f"Cevapsız: {disc.get('unanswered_total', 0)} · "
+                            f"Eksik İlgi: {disc.get('missing_refs_total', 0)})"
+                        )
+                        if corr_state["selected_cluster_id"] != "ALL":
+                            btn_audit_cluster.enable()
+                        else:
+                            btn_audit_cluster.disable()
+
+                        if g["total_in_project"] == 0:
+                            corr_status_banner.text = "Bu proje için henüz yazışma yüklenmedi (0 kayıt). 'Klasörden Toplu Yazışma Al' ile başlayabilirsiniz."
+                        elif g["truncated"]:
+                            corr_status_banner.text = (
+                                f"Büyük Arşiv Koruması: {g['total_matching']} eşleşen yazıdan en yüksek riskli {g['shown_docs']} düğüm çizildi. "
+                                f"Detaylı incelemek için aşağıdan bir Uyuşmazlık Kümesi seçin veya arama yapın."
+                            )
+                        else:
+                            corr_status_banner.text = f"Gösterilen: {g['shown_docs']} / {g['total_in_project']} yazışma."
+
+                        pend_table.rows = g["pending_review"]
+                        pend_table.update()
+                        pend_title.text = f"İnsan Onayı Bekleyenler ({len(g['pending_review'])})"
+                        hist_table.rows = g["state_history"]
+                        hist_table.update()
+                        elem_json = json.dumps(g["elements"], ensure_ascii=False)
+                        await ui.run_javascript(f"window.renderCorrespondenceGraph('cy_correspondence', {elem_json});")
+                    finally:
+                        corr_state["updating_ui"] = False
+
+                async def on_cluster_row_click(e) -> None:
+                    row = e.args[1] if (e.args and len(e.args) > 1 and isinstance(e.args[1], dict)) else None
+                    if not row and getattr(e, "selection", None):
+                        row = e.selection[0]
+                    if row and row.get("cluster_id"):
+                        corr_cluster_select.value = row["cluster_id"]
+                        await refresh_corr_tab(reset_cluster=False)
+
+                clusters_table.on("rowClick", on_cluster_row_click)
+                clusters_table.on_select(on_cluster_row_click)
+                btn_show_all_clusters.on_click(lambda: refresh_corr_tab(reset_cluster=True))
+                corr_proj_select.on_value_change(lambda _: refresh_corr_tab(reset_cluster=True))
+                corr_cluster_select.on_value_change(lambda _: refresh_corr_tab(reset_cluster=False))
+                corr_role_select.on_value_change(lambda _: refresh_corr_tab(reset_cluster=False))
+                corr_only_pending.on_value_change(lambda _: refresh_corr_tab(reset_cluster=False))
+                corr_search_input.on("keydown.enter", lambda _: refresh_corr_tab(reset_cluster=False))
+                corr_search_input.on("clear", lambda _: refresh_corr_tab(reset_cluster=False))
+
+                # 0-LLM Uyuşmazlık Matrisi Word İndir
+                def export_matrix_click() -> None:
+                    sel_p = corr_proj_select.value
+                    res = build_dispute_matrix_export(project_id=None if sel_p == "Tümü" else sel_p)
+                    if res["discovery"]["total_docs"] == 0:
+                        ui.notify("Özet matris için önce projeye yazışma yüklemelisiniz.", type="warning")
+                        return
+                    fname = f"Uyusmazlik_Matrisi_{sel_p or 'Tumu'}.docx"
+                    ui.download(res["docx_bytes"], filename=fname)
+
+                btn_export_matrix.on_click(export_matrix_click)
+
+                # Seçili Küme Toplu Zincir Denetimi (Arka Plan İş Parçacığı + Polling)
+                def poll_cluster_audit_q() -> None:
+                    q: queue.Queue = corr_state["cluster_q"]
+                    while not q.empty():
+                        ev, payload = q.get_nowait()
+                        if ev == "status":
+                            cluster_audit_status.text = str(payload)
+                        elif ev == "done":
+                            cluster_timer.active = False
+                            corr_state["cluster_running"] = False
+                            btn_audit_cluster.enable()
+                            corr_state["cluster_report_md"] = payload.get("final_report", "")
+                            corr_state["cluster_report_title"] = f"{payload.get('cluster_id')} — {payload.get('title')}"
+                            cluster_rep_header.text = f"Uyuşmazlık Zincir Raporu: {corr_state['cluster_report_title']}"
+                            cluster_rep_md.content = corr_state["cluster_report_md"]
+                            cluster_audit_status.text = f"✔ Zincir raporu hazır: {Path(payload.get('saved_report_path', '')).name}"
+                            cluster_report_dialog.open()
+                            ui.notify("Toplu uyuşmazlık zincir raporu tamamlandı!", type="positive")
+                        elif ev == "error":
+                            cluster_timer.active = False
+                            corr_state["cluster_running"] = False
+                            btn_audit_cluster.enable()
+                            cluster_audit_status.text = f"Hata: {payload}"
+                            ui.notify(f"Zincir denetim hatası: {payload}", type="negative")
+
+                cluster_timer = ui.timer(0.35, poll_cluster_audit_q, active=False)
+
+                def start_cluster_audit_click() -> None:
+                    if corr_state["cluster_running"]:
+                        return
+                    cid = corr_state.get("selected_cluster_id")
+                    cl = next((c for c in corr_state["clusters"] if c["cluster_id"] == cid), None)
+                    if not cl:
+                        ui.notify("Önce tablodan bir uyuşmazlık kümesi seçin.", type="warning")
+                        return
+                    corr_state["cluster_running"] = True
+                    btn_audit_cluster.disable()
+                    q: queue.Queue = corr_state["cluster_q"]
+                    while not q.empty():
+                        q.get_nowait()
+                    cluster_audit_status.text = f"{cid} ({cl['doc_count']} yazı) denetleniyor..."
+                    cluster_timer.active = True
+
+                    def _cl_worker() -> None:
+                        try:
+                            out = run_cluster_dispute_audit(
+                                project_id=cl["project_id"],
+                                cluster_doc_ids=cl["doc_ids"],
+                                cluster_title=cl["title"],
+                                cluster_id=cl["cluster_id"],
+                                progress_cb=lambda m: q.put(("status", m)),
+                            )
+                            q.put(("done", out))
+                        except Exception as exc:
+                            q.put(("error", str(exc)))
+
+                    import threading
+                    threading.Thread(target=_cl_worker, daemon=True).start()
+
+                btn_audit_cluster.on_click(start_cluster_audit_click)
+                btn_cl_dl_docx.on_click(
+                    lambda: ui.download(
+                        build_docx_bytes_from_markdown(corr_state["cluster_report_md"], corr_state["cluster_report_title"]),
+                        filename=f"Uyusmazlik_{corr_state.get('selected_cluster_id', 'K01')}.docx",
+                    ) if corr_state["cluster_report_md"] else None
+                )
+                btn_cl_dl_md.on_click(
+                    lambda: ui.download(
+                        corr_state["cluster_report_md"].encode("utf-8"),
+                        filename=f"Uyusmazlik_{corr_state.get('selected_cluster_id', 'K01')}.md",
+                    ) if corr_state["cluster_report_md"] else None
+                )
+
+                # Klasörden Toplu Yazışma Al (Arka Plan İş Parçacığı + Canlı İlerleme)
+                async def poll_batch_ingest_q() -> None:
+                    q: queue.Queue = corr_state["batch_q"]
+                    while not q.empty():
+                        ev, payload = q.get_nowait()
+                        if ev == "progress":
+                            cur, tot, fn = payload
+                            batch_progress_lbl.text = f"[{cur}/{tot}] İşleniyor: {fn}"
+                        elif ev == "done":
+                            batch_timer.active = False
+                            corr_state["batch_running"] = False
+                            btn_run_batch.enable()
+                            batch_progress_lbl.text = (
+                                f"✔ Tamamlandı: {payload['processed']} işlendi, {payload['skipped']} atlandı, "
+                                f"{payload['failed']} hata | Taraf dağılımı: {payload.get('role_counts', {})}"
+                            )
+                            ui.notify("Toplu yazışma alımı tamamlandı!", type="positive")
+                            refresh_memory_tab()
+                            await refresh_corr_tab(reset_cluster=True)
+                        elif ev == "error":
+                            batch_timer.active = False
+                            corr_state["batch_running"] = False
+                            btn_run_batch.enable()
+                            batch_progress_lbl.text = f"Hata: {payload}"
+                            ui.notify(f"Alım hatası: {payload}", type="negative")
+
+                batch_timer = ui.timer(0.4, poll_batch_ingest_q, active=False)
+
+                def start_batch_ingest_click() -> None:
+                    if corr_state["batch_running"]:
+                        return
+                    sel_proj = batch_proj_sel.value
+                    src_txt = (batch_dir_input.value or "").strip() or None
+                    org_flag = bool(batch_organize_chk.value)
+                    corr_state["batch_running"] = True
+                    btn_run_batch.disable()
+                    q: queue.Queue = corr_state["batch_q"]
+                    while not q.empty():
+                        q.get_nowait()
+                    batch_progress_lbl.text = "Dosyalar taranıyor ve OCR/sınıflandırma başlatılıyor..."
+                    batch_timer.active = True
+
+                    def _b_worker() -> None:
+                        try:
+                            res = run_batch_history_ingest(
+                                project_id=sel_proj,
+                                source_dir=src_txt,
+                                organize=org_flag,
+                                use_llm=False,
+                                progress_cb=lambda cur, tot, fn: q.put(("progress", (cur, tot, fn))),
+                            )
+                            q.put(("done", res))
+                        except Exception as exc:
+                            q.put(("error", str(exc)))
+
+                    import threading
+                    threading.Thread(target=_b_worker, daemon=True).start()
+
+                btn_open_batch.on_click(batch_dialog.open)
+                btn_run_batch.on_click(start_batch_ingest_click)
 
             # ==================================================================
             # SEKME 3: DİLEKÇE YÜKLE & CANLI DENETLE (2_agents_graph.py)
