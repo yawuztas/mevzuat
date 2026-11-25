@@ -192,8 +192,9 @@ def _index_reply_chroma(
     fp: Path,
     rel_path: str,
     project_id: str,
+    correspondence_db_dir: Optional[Path] = None,
 ) -> int:
-    """Cevap yazısını ChromaDB'ye STRICT `doc_role='correspondence_history'` ile yazar."""
+    """Cevap yazısını fiziksel olarak ayrı yazışma ChromaDB'sine (`vector_db_yazismalar/proje_yazismalari`) yazar."""
     import importlib.util
 
     ing1_path = Path(__file__).resolve().parent.parent / "1_ingest.py"
@@ -201,9 +202,9 @@ def _index_reply_chroma(
     ing1 = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ing1)
 
-    from utils.retriever import detect_project_procurement_type, get_chroma_collection, get_embedding_model
+    from utils.retriever import detect_project_procurement_type, get_correspondence_collection, get_embedding_model
 
-    col = get_chroma_collection()
+    col = get_correspondence_collection(db_dir=correspondence_db_dir)
     emb = get_embedding_model()
     proc_type = detect_project_procurement_type(project_id)
     parcalar = ing1.split_markdown_into_legal_chunks(
@@ -261,6 +262,7 @@ def record_admin_reply(
     role: str = "administration",
     conn: Optional[sqlite3.Connection] = None,
     db_path: Optional[Path] = None,
+    correspondence_db_dir: Optional[Path] = None,
     confirm_state: Optional[str] = None,
     confirmed_by_human: bool = False,
     use_llm: bool = False,
@@ -391,7 +393,14 @@ def record_admin_reply(
 
         chroma_count = 0
         if index_chroma:
-            chroma_count = _index_reply_chroma(md_text, card, fp, rel_path, project_id)
+            chroma_count = _index_reply_chroma(
+                md_text,
+                card,
+                fp,
+                rel_path,
+                project_id,
+                correspondence_db_dir=correspondence_db_dir,
+            )
 
         return {
             "reply_card": card,

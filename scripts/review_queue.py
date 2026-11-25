@@ -13,6 +13,7 @@ import argparse
 import sys
 import re
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 if sys.platform.startswith("win"):
@@ -60,11 +61,13 @@ def relink_after_fix(conn, project_id: str, target_doc_id: str, doc_no: str) -> 
     return linked
 
 
-def _sync_chroma_card(kart: dict) -> None:
-    """Düzenlenen Kimlik Kartı alanlarını ChromaDB correspondence parçalarına da yansıtır."""
+def _sync_chroma_card(kart: dict, correspondence_db_dir: Optional[Path] = None) -> None:
+    """Düzenlenen Kimlik Kartı alanlarını ayrı yazışma ChromaDB'sine (`vector_db_yazismalar`) yansıtır."""
     try:
-        from utils.retriever import get_chroma_collection
-        col = get_chroma_collection()
+        from utils.retriever import get_correspondence_collection
+        col = get_correspondence_collection(db_dir=correspondence_db_dir)
+        if col.count() == 0:
+            return
         res = col.get(where={"sqlite_doc_id": kart["doc_id"]}, include=["metadatas"])
         ids = res.get("ids") or []
         metas = res.get("metadatas") or []

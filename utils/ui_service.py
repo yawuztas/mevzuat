@@ -46,7 +46,12 @@ from utils.project_db import (
     pending_review,
     update_state,
 )
-from utils.retriever import detect_project_procurement_type, get_chroma_collection, search_and_rerank
+from utils.retriever import (
+    detect_project_procurement_type,
+    get_chroma_collection,
+    get_correspondence_collection,
+    search_and_rerank,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -91,20 +96,29 @@ def list_known_projects(data_dir: Optional[Path] = None) -> List[str]:
     return sorted(found)
 
 
-def get_memory_inventory_and_tree() -> Dict[str, Any]:
-    """ChromaDB 'insaat_mevzuat' koleksiyonunu ECharts ağaç & grafik verisine dönüştürür."""
-    col = get_chroma_collection()
-    total = col.count()
-    if total == 0:
+def get_memory_inventory_and_tree(correspondence_db_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """
+    Fiziksel olarak ayrılmış iki ChromaDB deposunu (Katman 1+2 Normatif DB `vector_db`
+    ve Katman 3 Yazışma DB `vector_db_yazismalar`) ECharts ağaç & grafik verisine dönüştürür.
+    """
+    norm_col = get_chroma_collection()
+    corr_col = get_correspondence_collection(db_dir=correspondence_db_dir)
+
+    norm_metas = norm_col.get(include=["metadatas"]).get("metadatas") or [] if norm_col.count() > 0 else []
+    corr_metas = corr_col.get(include=["metadatas"]).get("metadatas") or [] if corr_col.count() > 0 else []
+
+    total_all = len(norm_metas) + len(corr_metas)
+    if total_all == 0:
         return {
             "total_vectors": 0,
-            "layer_counts": {"global": 0, "project": 0, "correspondence": 0},
+            "normative_vectors": 0,
+            "correspondence_vectors": 0,
+            "layer_counts": {"global": 0, "project_normative": 0, "correspondence_history": 0},
             "project_counts": {},
             "subsystem_counts": {},
             "tree": {"name": "Kalıcı Hafıza (Boş)", "children": []},
         }
 
-    metas = col.get(include=["metadatas"]).get("metadatas") or []
     layer_counts = {"global": 0, "project_normative": 0, "correspondence_history": 0}
     project_counts: Counter = Counter()
     subsystem_counts: Counter = Counter()
@@ -114,10 +128,9 @@ def get_memory_inventory_and_tree() -> Dict[str, Any]:
     proj_tree: Dict[str, Dict[str, Counter]] = defaultdict(lambda: defaultdict(Counter))
     corr_tree: Dict[str, Counter] = defaultdict(Counter)
 
-    for m in metas:
+    for m in norm_metas:
         scope = m.get("scope", "global")
         pid = m.get("project_id", "global")
-        doc_role = m.get("doc_role", "normative_rule")
         doc_type = m.get("doc_type", "genel_referans")
         subsystem = m.get("subsystem", "genel")
         sf = m.get("source_file", "Bilinmeyen")
@@ -125,15 +138,18 @@ def get_memory_inventory_and_tree() -> Dict[str, Any]:
         subsystem_counts[subsystem] += 1
         project_counts[pid] += 1
 
-        if doc_role == "correspondence_history":
-            layer_counts["correspondence_history"] += 1
-            corr_tree[pid][sf] += 1
-        elif scope == "global":
+        if scope == "global":
             layer_counts["global"] += 1
             global_tree[doc_type][sf] += 1
         else:
             layer_counts["project_normative"] += 1
             proj_tree[pid][doc_type][sf] += 1
+
+    for m in corr_metas:
+        pid = m.get("project_id", "bilinmeyen_proje")
+        sf = m.get("source_file", "Bilinmeyen")
+        layer_counts["correspondence_history"] += 1
+        corr_tree[pid][sf] += 1
 
     # ECharts tree düğümleri oluştur (varsayılan 1. seviye açık, yapraklar kapalı)
     l1_children = []
@@ -144,7 +160,13 @@ def get_memory_inventory_and_tree() -> Dict[str, Any]:
             {
                 "name": f"{sf} ({cnt})",
                 "value": cnt,
-                "meta": {"project_id": "global", "source_file": sf, "doc_type": dt, "layer": "Katman 1"},
+                "meta": {
+                    "project_id": "global",
+                    "source_file": sf,
+                    "doc_type": dt,
+                    "doc_role": "normative_rule",
+                    "layer": "Katman 1",
+                },
             }
             for sf, cnt in sorted(files_counter.items())
         ]
@@ -167,7 +189,13 @@ def get_memory_inventory_and_tree() -> Dict[str, Any]:
                 {
                     "name": f"{sf} ({cnt})",
                     "value": cnt,
-                    "meta": {"project_id": pid, "source_file": sf, "doc_type": dt, "layer": "Katman 2"},
+                    "meta": {
+                        "project_id": pid,
+                        "source_file": sf,
+                        "doc_type": dt,
+                        "doc_role": "normative_rule",
+                        "layer": "Katman 2",
+                    },
                 }
                 for sf, cnt in sorted(files_counter.items())
             ]
@@ -192,7 +220,13 @@ def get_memory_inventory_and_tree() -> Dict[str, Any]:
             {
                 "name": f"{sf} ({cnt})",
                 "value": cnt,
-                "meta": {"project_id": pid, "source_file": sf, "doc_type": "correspondence", "layer": "Katman 3"},
+                "meta": {
+                    "project_id": pid,
+                    "source_file": sf,
+                    "doc_type": "correspondence",
+                    "doc_role": "correspondence_history",
+                    "layer": "Katman 3",
+                },
             }
             for sf, cnt in sorted(files_counter.items())
         ]
@@ -204,31 +238,33 @@ def get_memory_inventory_and_tree() -> Dict[str, Any]:
         })
 
     tree_root = {
-        "name": f"InsaatAudit Hafıza ({len(metas):,})",
+        "name": f"InsaatAudit Hafıza ({total_all:,})",
         "children": [
             {
-                "name": f"Katman 1: Genel Mevzuat & Norm ({layer_counts['global']:,})",
+                "name": f"Katman 1: Genel Mevzuat & Norm [vector_db] ({layer_counts['global']:,})",
                 "value": layer_counts["global"],
                 "collapsed": False,
                 "children": l1_children,
             },
             {
-                "name": f"Katman 2: Proje Sözleşme & Şartname ({layer_counts['project_normative']:,})",
+                "name": f"Katman 2: Proje Sözleşme & Şartname [vector_db] ({layer_counts['project_normative']:,})",
                 "value": layer_counts["project_normative"],
                 "collapsed": False,
                 "children": l2_children,
             },
             {
-                "name": f"Katman 3: Yazışma Geçmişi ({layer_counts['correspondence_history']:,})",
+                "name": f"Katman 3: Yazışma DB [vector_db_yazismalar] ({layer_counts['correspondence_history']:,})",
                 "value": layer_counts["correspondence_history"],
                 "collapsed": True,
-                "children": l3_children if l3_children else [{"name": "Henüz gerçek yazışma yüklenmedi (0)", "value": 0}],
+                "children": l3_children if l3_children else [{"name": "Ayrı Yazışma DB temiz / henüz yazışma eklenmedi (0)", "value": 0}],
             },
         ],
     }
 
     return {
-        "total_vectors": len(metas),
+        "total_vectors": total_all,
+        "normative_vectors": len(norm_metas),
+        "correspondence_vectors": len(corr_metas),
         "layer_counts": layer_counts,
         "project_counts": dict(project_counts),
         "subsystem_counts": dict(subsystem_counts.most_common()),
@@ -236,9 +272,20 @@ def get_memory_inventory_and_tree() -> Dict[str, Any]:
     }
 
 
-def get_document_chunks(project_id: str, source_file: str, limit: int = 80) -> List[Dict[str, Any]]:
-    """Belirli bir dosya ve proje için ChromaDB içindeki parçaları sayfa sırasıyla döndürür."""
-    col = get_chroma_collection()
+def get_document_chunks(
+    project_id: str,
+    source_file: str,
+    limit: int = 80,
+    doc_role: Optional[str] = None,
+    correspondence_db_dir: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Belirli bir dosya ve proje için uygun ChromaDB deposundaki parçaları sayfa sırasıyla döndürür."""
+    if doc_role == "correspondence_history":
+        col = get_correspondence_collection(db_dir=correspondence_db_dir)
+    else:
+        col = get_chroma_collection()
+    if col.count() == 0:
+        return []
     res = col.get(
         where={"$and": [{"project_id": project_id}, {"source_file": source_file}]},
         include=["documents", "metadatas"],
@@ -259,6 +306,7 @@ def semantic_search_memory(
     domain: Optional[str] = None,
     doc_role: Optional[str] = "normative_rule",
     top_k: int = 6,
+    correspondence_db_dir: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
     if not query or not query.strip():
         return []
@@ -270,6 +318,7 @@ def semantic_search_memory(
         candidate_k=20,
         final_top_k=top_k,
         doc_role=None if (not doc_role or doc_role == "Tümü") else doc_role,
+        correspondence_db_dir=correspondence_db_dir,
     )
 
 
@@ -421,8 +470,14 @@ def update_card_and_approve(
     new_state: Optional[str] = None,
     confirmed_by_human: bool = True,
     db_path: Optional[Path] = None,
+    correspondence_db_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """İnsan onayıyla kimlik kartını düzeltir (`human_approved`) ve gerekirse durum geçişi uygular."""
+    """
+    İnsan onayıyla kimlik kartını düzeltir (`human_approved`), gerekirse durum geçişi uygular,
+    yazışma ChromaDB (`vector_db_yazismalar`) meta verisini senkronlar ve çözülmemiş İlgi kenarlarını yeniden bağlar.
+    """
+    from scripts.review_queue import _sync_chroma_card, relink_after_fix
+
     conn = connect(db_path)
     try:
         card = get_document(conn, doc_id)
@@ -453,7 +508,12 @@ def update_card_and_approve(
             state_changed = update_state(conn, doc_id, new_state, triggered_by_doc_id="UI_HUMAN_APPROVAL", confirmed_by_human=True)
 
         updated = get_document(conn, doc_id)
-        return {"card": updated, "state_changed": state_changed}
+        relinked = 0
+        if updated:
+            _sync_chroma_card(updated, correspondence_db_dir=correspondence_db_dir)
+            if updated.get("doc_no"):
+                relinked = relink_after_fix(conn, updated["project_id"], doc_id, updated["doc_no"])
+        return {"card": updated, "state_changed": state_changed, "relinked": relinked}
     finally:
         conn.close()
 
@@ -469,7 +529,8 @@ def save_uploaded_petition(filename: str, content_bytes: bytes, project_id: str)
     if ext not in SUPPORTED_DOC_EXTENSIONS:
         raise ValueError(f"Desteklenmeyen dosya uzantısı: {ext}")
     safe_proj = re.sub(r"[^a-zA-Z0-9_-]", "_", project_id or "ornek_proje")
-    dest_dir = YUKLENICI_TALEPLERI_DIR / safe_proj / "_ui_yuklenenler"
+    # Ad-hoc UI denetim yüklemeleri Katman 3 proje klasörlerini kirletmeden raporlar altında tutulur
+    dest_dir = RAPORLAR_DIR / "_ui_yuklenenler" / safe_proj
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_path = dest_dir / safe_name
     dest_path.write_bytes(content_bytes)

@@ -39,7 +39,7 @@ from utils.text_tr import tr_lower
 
 
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp"}
-SUPPORTED_DOC_EXTENSIONS = {".pdf", ".md", ".txt", ".html"} | SUPPORTED_IMAGE_EXTENSIONS
+SUPPORTED_DOC_EXTENSIONS = {".pdf", ".docx", ".doc", ".md", ".txt", ".html"} | SUPPORTED_IMAGE_EXTENSIONS
 
 
 
@@ -824,9 +824,24 @@ def parse_any_document(file_path: Union[str, Path], use_cache: bool = True, max_
             try:
                 import docx as py_docx
                 d_obj = py_docx.Document(str(path))
-                paras = [p.text.strip() for p in d_obj.paragraphs if p.text.strip()]
-                if paras:
-                    parsed_pages.append("\n## --- Dijital Word Belgesi ---\n" + "\n\n".join(paras))
+                parts_out: List[str] = []
+                for p in d_obj.paragraphs:
+                    txt = p.text.strip()
+                    if txt:
+                        parts_out.append(txt)
+                for tbl in d_obj.tables:
+                    rows_md: List[str] = []
+                    for r_idx, row in enumerate(tbl.rows):
+                        cells = [c.text.strip().replace("\n", " ").replace("|", "/") for c in row.cells]
+                        if not any(cells):
+                            continue
+                        rows_md.append("| " + " | ".join(cells) + " |")
+                        if len(rows_md) == 1:
+                            rows_md.append("| " + " | ".join(["---"] * len(cells)) + " |")
+                    if rows_md:
+                        parts_out.append("\n".join(rows_md))
+                if parts_out:
+                    parsed_pages.append("\n## --- Dijital Word Belgesi ---\n" + "\n\n".join(parts_out))
             except Exception as e:
                 console.print(f"  [yellow]⚠ Word ayrıştırma uyarısı ({path.name}): {e}[/yellow]")
 

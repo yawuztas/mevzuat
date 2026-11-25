@@ -287,6 +287,7 @@ def build_case_context(
     project_id: Optional[str] = None,
     conn: Optional[sqlite3.Connection] = None,
     db_path: Optional[Path] = None,
+    correspondence_db_dir: Optional[Path] = None,
     history_base_dir: Path = YUKLENICI_TALEPLERI_DIR,
     verbatim_chain_count: int = DEFAULT_VERBATIM_CHAIN_COUNT,
     summary_chain_levels: int = DEFAULT_SUMMARY_CHAIN_LEVELS,
@@ -414,37 +415,39 @@ def build_case_context(
         for oc in open_claims:
             seen_ids.add(oc["doc_id"])
 
-        # 3. İsteğe bağlı Semantik Tarihçe Araması (ChromaDB doc_role='correspondence_history')
+        # 3. İsteğe bağlı Semantik Tarihçe Araması (Fiziksel olarak ayrı Yazışma ChromaDB: vector_db_yazismalar)
         semantic_docs: List[Dict[str, Any]] = []
         if use_semantic_history:
             try:
-                from utils.retriever import get_chroma_collection, search_and_rerank
+                from utils.retriever import get_correspondence_collection, search_and_rerank
 
-                col = get_chroma_collection()
-                hist_check = col.get(
-                    where={"$and": [{"project_id": project_id}, {"doc_role": "correspondence_history"}]},
-                    limit=1,
-                )
-                if hist_check.get("ids"):
-                    sem_query = f"{card.get('subject') or ''} {doc_text[:600]}".strip()
-                    sem_res = search_and_rerank(
-                        query=sem_query,
-                        project_id=project_id,
-                        candidate_k=12,
-                        final_top_k=4,
-                        doc_role="correspondence_history",
+                col = get_correspondence_collection(db_dir=correspondence_db_dir)
+                if col.count() > 0:
+                    hist_check = col.get(
+                        where={"$and": [{"project_id": project_id}, {"doc_role": "correspondence_history"}]},
+                        limit=1,
                     )
-                    for sr in sem_res:
-                        meta = sr.get("metadata", {})
-                        s_doc_id = meta.get("sqlite_doc_id")
-                        if s_doc_id and s_doc_id not in seen_ids:
-                            row = conn.execute("SELECT * FROM documents WHERE doc_id=?", (s_doc_id,)).fetchone()
-                            if row:
-                                rd = dict(row)
-                                rd["_semantic_excerpt"] = sr.get("content", "")
-                                rd["_rerank_score"] = sr.get("rerank_score", 0.0)
-                                seen_ids.add(s_doc_id)
-                                semantic_docs.append(rd)
+                    if hist_check.get("ids"):
+                        sem_query = f"{card.get('subject') or ''} {doc_text[:600]}".strip()
+                        sem_res = search_and_rerank(
+                            query=sem_query,
+                            project_id=project_id,
+                            candidate_k=12,
+                            final_top_k=4,
+                            doc_role="correspondence_history",
+                            correspondence_db_dir=correspondence_db_dir,
+                        )
+                        for sr in sem_res:
+                            meta = sr.get("metadata", {})
+                            s_doc_id = meta.get("sqlite_doc_id")
+                            if s_doc_id and s_doc_id not in seen_ids:
+                                row = conn.execute("SELECT * FROM documents WHERE doc_id=?", (s_doc_id,)).fetchone()
+                                if row:
+                                    rd = dict(row)
+                                    rd["_semantic_excerpt"] = sr.get("content", "")
+                                    rd["_rerank_score"] = sr.get("rerank_score", 0.0)
+                                    seen_ids.add(s_doc_id)
+                                    semantic_docs.append(rd)
             except Exception:
                 pass
 

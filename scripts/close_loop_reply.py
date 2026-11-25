@@ -47,7 +47,7 @@ def main():
                     help="Doğrudan verilecek yeni durum (yalnızca --yes ile otomatik uygulanır)")
     ap.add_argument("--yes", action="store_true", help="--confirm-state değerini soru sormadan onayla")
     ap.add_argument("--no-confirm", action="store_true", help="Durumu değiştirme, yalnızca öneri raporla")
-    ap.add_argument("--chroma", action="store_true", help="ChromaDB correspondence_history koleksiyonuna da yaz")
+    ap.add_argument("--chroma", action="store_true", help="Ayrı Yazışma ChromaDB'sine (vector_db_yazismalar / proje_yazismalari) da yaz")
     ap.add_argument("--use-llm", action="store_true", help="instructor + langextract zenginleştirmesi")
     args = ap.parse_args()
 

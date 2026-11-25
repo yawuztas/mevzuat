@@ -16,7 +16,14 @@ RAPORLAR_DIR = DATA_DIR / "raporlar"
 # Geriye dönük uyumluluk takma adları (Alias)
 KANUNLAR_DIR = GENEL_MEVZUAT_DIR
 YUKLENICI_DIR = YUKLENICI_TALEPLERI_DIR
+
+# Fiziksel olarak ayrılmış iki ChromaDB vektör veritabanı:
+# 1) VECTOR_DB_DIR ('insaat_mevzuat'): Yalnızca Katman 1 (Genel Mevzuat/Standartlar) ve Katman 2 (Proje Sözleşme/Şartnameleri)
+# 2) CORRESPONDENCE_VECTOR_DB_DIR ('proje_yazismalari'): Yalnızca Katman 3 (Yüklenici / İdare / Müşavir Yazışmaları)
 VECTOR_DB_DIR = BASE_DIR / "vector_db"
+CORRESPONDENCE_VECTOR_DB_DIR = BASE_DIR / "vector_db_yazismalar"
+NORMATIVE_COLLECTION_NAME = "insaat_mevzuat"
+CORRESPONDENCE_COLLECTION_NAME = "proje_yazismalari"
 
 # Model ve Aygıt Ayarları
 DEVICE = os.getenv("DEVICE", "cuda")
@@ -27,7 +34,7 @@ RERANKER_MODEL_NAME = os.getenv("RERANKER_MODEL_NAME", "BAAI/bge-reranker-v2-m3"
 DEFAULT_LLM_PROVIDER = os.getenv("DEFAULT_LLM_PROVIDER", "google").lower()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY", "")
-GOOGLE_MODEL_NAME = os.getenv("GOOGLE_MODEL_NAME", "gemini-3.5-flash-lite")
+GOOGLE_MODEL_NAME = os.getenv("GOOGLE_MODEL_NAME", "gemini-2.5-flash")
 ANTHROPIC_MODEL_NAME = os.getenv("ANTHROPIC_MODEL_NAME", "claude-3-7-sonnet-latest")
 
 

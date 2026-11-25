@@ -307,17 +307,21 @@ tree_text = """d:\\mevzuatinceleme\\
 │   │   ├── kirazli_halkali_metro/        # Kirazlı-Halkalı Metro Hattı (Aynı 5 Sütunlu Standart Yapı) [procurement_type='yapim']
 │   │   └── ikitelli_atakoy_musavirlik/   # Müşavirlik Sözleşme ve Şartnameleri (5 Sütunlu Yapı) [procurement_type='danismanlik']
 │   │
-│   ├── 3_yuklenici_talepleri/            # [SEVİYE 3 - TALEPLER] Denetlenecek yüklenici dilekçe ve raporları
-│   │   ├── ikitelli_atakoy_metro/        # Alstom hassas duruş test raporu, ISA emniyet raporu
-│   │   └── ornek_proje/                  # Süre uzatımı ve fiyat farkı talep dilekçeleri
+│   ├── 3_yuklenici_talepleri/            # [SEVİYE 3 - YAZIŞMALAR] Proje bazlı yazışma & talep klasörleri (temiz başlangıç)
+│   │   ├── ikitelli_atakoy_metro/        # Boş proje klasörü (gerçek yazışmalar eklendikçe ingest_history ile işlenir)
+│   │   ├── kirazli_halkali_metro/        # Boş proje klasörü
+│   │   ├── ikitelli_atakoy_musavirlik/   # Boş proje klasörü
+│   │   └── ornek_proje/                  # Sentetik demo dilekçesi
 │   │
 │   └── raporlar/                         # Üretilen resmi denetim raporları (.md ve .docx)
 │
-├── vector_db/                            # ChromaDB Vektör Tabanı Dizin ve Manifest Dosyaları
-│   ├── chroma.sqlite3                    # HNSW Cosine indeksli SQLite veritabanı (9.276 doğrulanmış vektör)
+├── vector_db/                            # [CHROMA #1] Saf Normatif Vektör DB (Katman 1 + Katman 2)
+│   ├── chroma.sqlite3                    # HNSW Cosine indeksli veritabanı (11.098 saf normatif vektör, 0 yazışma)
 │   └── ingested_manifest.json            # project_id::rel_path artımlı indeks manifesti
 │
+├── vector_db_yazismalar/                 # [CHROMA #2] Fiziksel Ayrı Yazışma Vektör DB (Katman 3: proje_yazismalari)
 ├── data/project_graph.db                 # SQLite 4 Tablolu Proje Yazışma Çizgesi (documents, links, tags, state_history)
+├── ui_app.py                             # NiceGUI + Apache ECharts + Cytoscape.js 4 Sekmeli Görsel Denetim Stüdyosu
 │
 └── _arsiv/                               # İzole Edilmiş Yedekler ve Ham Dosyalar (Aramaya Kapalı)
     ├── root_scripts/                     # Geçici test ve kıyaslama scriptleri
@@ -496,10 +500,10 @@ format_table(
             "Dijital şartnamelerden yüksek hızlı metin çekme, mükerrersiz tablo katmanı çıkarma ve 150 DPI sayfa görseli oluşturma."
         ],
         [
-            "Google Gemini 3.5 Flash Lite",
+            "Google Gemini 2.5 Flash",
             "LLM (Google GenAI API)",
             "Bulut API",
-            "Router analizi, uzman ajan değerlendirmesi ve baş denetçi sentezi için yüksek hızlı, 1M token pencereli ana zeka."
+            "Router analizi, uzman ajan değerlendirmesi ve baş denetçi sentezi için yüksek hızlı, 1M token pencereli ana zeka (Anthropic Claude seçeneğiyle)."
         ],
         [
             "LangGraph & LangChain",
@@ -646,13 +650,13 @@ format_table(
         ],
         [
             "2. İkitelli-Ataköy Metro Hattı (M9)\n(5 Sütun: Sözleşme, İdari, 10 Disiplin Teknik Şartname, Birim Fiyat, Zeyilname)",
-            "15 adet normatif ihale dosyası\n(İmzalı Sözleşme + EKAP Tasarı + İdari + Zeyilname + Birim Fiyat + 10 Dijital Teknik Bölüm; test raporları _arsiv ve Katman 3'te)",
-            "1.914 Vektör (1.910 normatif + 4 E2E yazışma test kaydı) — İkitelli'ye izole (project_id='ikitelli_atakoy_metro', procurement_type='yapim')."
+            "15 adet normatif ihale dosyası\n(İmzalı Sözleşme + EKAP Tasarı + İdari + Zeyilname + Birim Fiyat + 10 Dijital Teknik Bölüm; test raporları _arsiv'de)",
+            "1.910 Saf Normatif Vektör — İkitelli'ye izole (project_id='ikitelli_atakoy_metro', procurement_type='yapim'; 0 yazışma)."
         ],
         [
             "3. Kirazlı-Halkalı Metro Hattı\n(Sözleşme, İdari, 20 Disiplin/BIM Şartnamesi, Birim Fiyat)",
             "25 adet dosya\n(Tüm şartnameler + BIM ekleri; zeyilname bulunmuyor)",
-            "3.747 Vektör — Disiplin etiketleri güncel (%100 subsystem uyumlu, procurement_type='yapim')."
+            "3.747 Saf Normatif Vektör — Disiplin etiketleri güncel (%100 subsystem uyumlu, procurement_type='yapim')."
         ],
         [
             "4. İkitelli Ataköy Müşavirlik\n(Ham dosyalar yenilenene kadar veritabanından temizlendi)",
@@ -660,9 +664,14 @@ format_table(
             "0 Vektör (Eski sorunlu 254 vektör temizlendi; yeni ham dosyalar konunca yeniden indekslenecek)."
         ],
         [
-            "TOPLAM GÜNCEL KOLEKSİYON",
-            "90 Aktif Normatif Doküman\n+ SQLite Vaka Çizgesi",
-            "11.102 Doğrulanmış Chroma Vektörü (BGE-M3 1024-d) | Adım 2 standart_codes + Adım 3–5 SQLite Yazışma Hafızası + Resmi Mevzuat Sync Motoru"
+            "5. Fiziksel Ayrı Yazışma DB\n(vector_db_yazismalar/ + data/project_graph.db)",
+            "Temiz başlangıç (0 yüklenici yazısı)\nProje klasörleri hazır ve boş",
+            "0 Yazışma Vektörü + 0 SQLite Kaydı (Sentetik test yazıları temizlendi; gerçek yazışmalar eklendikçe yalnızca bu DB'ye yazılır)."
+        ],
+        [
+            "TOPLAM NORMATİF DB (vector_db/)",
+            "90 Aktif Normatif Doküman\n(Katman 1 + Katman 2)",
+            "11.098 Saf Normatif Chroma Vektörü (BGE-M3 1024-d, 0 yazışma sızıntısı) | Ayrı Yazışma DB: vector_db_yazismalar/ + project_graph.db"
         ]
     ]
 )
@@ -690,34 +699,34 @@ add_para("  - Yapım genel şartnamesi/yönetmeliği -> 2_sozlesme_ve_genel_sart
 add_para("  - Danışmanlık/Müşavirlik mevzuatı -> 2_sozlesme_ve_genel_sartnameler/danismanlik_ve_musavirlik/", bullet=False)
 add_para("  - Teknik standartlar -> 4_standart_normlar/<ilgili_disiplin_klasoru>/ (sinyalizasyon_ve_cbtc, cer_gucu_ve_elektrifikasyon vb.)", bullet=False)
 add_para("• Yeni bir proje ise: data/2_proje_evraklari/<yeni_proje_kodu>/ klasörü açın (Müşavirlik işi ise klasör adında 'musavirlik' veya 'danismanlik' geçsin).", bullet=True)
-add_para("• Denetlenecek yüklenici talebi ise: data/3_yuklenici_talepleri/<proje_kodu>/ klasörüne ekleyin.", bullet=True)
+add_para("• Yazışma arşivi (Katman 3) ise: data/3_yuklenici_talepleri/<proje_kodu>/ altında 1_yuklenici_yazilari/, 2_idare_cevaplari/, 3_tutanak_ve_toplantilar/, 4_hakedis_ozetleri/ klasörlerine ekleyin.", bullet=True)
 
-add_header("Adım 2: Katman 1 Resmi Mevzuat Güncelleme Kontrolü ve Vektör İndeksleme", level=2)
+add_header("Adım 2: Katman 1 Resmi Mevzuat Güncelleme Kontrolü ve Normatif Vektör İndeksleme (vector_db/)", level=2)
 add_para("• Resmi kaynaklarda (mevzuat.gov.tr + ihale.gov.tr) değişiklik kontrolü (dosyaya dokunmaz):")
 add_para(".\\venv\\Scripts\\python.exe -X utf8 scripts\\sync_mevzuat.py --check --deep", bold=True)
-add_para("• Değişiklik varsa eski sürümü data/_arsiv/mevzuat_surumleri/ altına yedekleyip madde-fark raporuyla eşitleme ve ChromaDB güncelleme:")
+add_para("• Değişiklik varsa eski sürümü data/_arsiv/mevzuat_surumleri/ altına yedekleyip madde-fark raporuyla eşitleme ve Normatif ChromaDB güncelleme:")
 add_para(".\\venv\\Scripts\\python.exe -X utf8 scripts\\sync_mevzuat.py --sync --ingest", bold=True)
-add_para("• Artımlı Vektör Güncelleme (Yalnızca yeni/değişen dosyaları ekler, standart/rol etiketlerini işler):")
+add_para("• Artımlı Normatif Vektör Güncelleme (Yalnızca Katman 1 + Katman 2; yazışmalara ASLA dokunmaz):")
 add_para(".\\venv\\Scripts\\python.exe -X utf8 1_ingest.py", bold=True)
-add_para("• Tam Sıfırlama (Koleksiyonu sıfırlayıp her şeyi baştan temiz indeksler):")
+add_para("• Tam Sıfırlama (Normatif koleksiyonu sıfırlayıp Katman 1+2'yi baştan temiz indeksler):")
 add_para(".\\venv\\Scripts\\python.exe -X utf8 1_ingest.py --reset", bold=True)
 
-add_header("Adım 3: Yazışma Arşivi, Onay Kuyruğu ve Kapalı Döngü Akışı (Adım 3–5)", level=2)
-add_para("• Geçmiş yazışma klasörünü SQLite + Chroma'ya besleme (2 turlu İlgi çözümü):")
-add_para(".\\venv\\Scripts\\python.exe -X utf8 ingest_history.py <klasor_yolu> --project ikitelli_atakoy_metro", bold=True)
-add_para("• Eksik tarih/sayılı kartları insan onay kuyruğunda düzeltme (pending_review -> approved):")
-add_para(".\\venv\\Scripts\\python.exe -X utf8 scripts\\review_queue.py", bold=True)
+add_header("Adım 3: Ayrı Yazışma DB (vector_db_yazismalar/), Onay Kuyruğu ve Görsel Stüdyo", level=2)
+add_para("• Geçmiş yazışmaları SQLite (project_graph.db) + Ayrı Yazışma ChromaDB'sine (vector_db_yazismalar/proje_yazismalari) besleme:")
+add_para(".\\venv\\Scripts\\python.exe -X utf8 ingest_history.py --project ikitelli_atakoy_metro", bold=True)
+add_para("• Eksik tarih/sayılı kartları insan onay kuyruğunda düzeltme (pending_review -> human_approved + otomatik İlgi bağlama):")
+add_para(".\\venv\\Scripts\\python.exe -X utf8 scripts\\review_queue.py --project ikitelli_atakoy_metro", bold=True)
 add_para("• İdare / Müşavir nihai cevabını sisteme geri işleyip ilgili talebi onaylı kapatma:")
-add_para(".\\venv\\Scripts\\python.exe -X utf8 scripts\\close_loop_reply.py --project ikitelli_atakoy_metro --file <cevap_yolu> --confirm", bold=True)
-add_para("• Çoklu Ajan (6 Düğümlü) denetimini çalıştırma ve 25 yazılık pilot ölçümü:")
-add_para(".\\venv\\Scripts\\python.exe -X utf8 2_agents_graph.py \"<evrak_yolu>\"", bold=True)
-add_para(".\\venv\\Scripts\\python.exe -X utf8 scripts\\run_pilot_eval.py --limit 25", bold=True)
+add_para(".\\venv\\Scripts\\python.exe -X utf8 scripts\\close_loop_reply.py --project ikitelli_atakoy_metro --file <cevap_yolu> --reply-to <doc_no> --confirm-state Cevaplandi --yes --chroma", bold=True)
+add_para("• Çoklu Ajan (6 Düğümlü) denetimini CLI'dan çalıştırma veya NiceGUI Görsel Stüdyoyu açma:")
+add_para(".\\venv\\Scripts\\python.exe -X utf8 2_agents_graph.py \"<evrak_yolu>\" --project ikitelli_atakoy_metro", bold=True)
+add_para(".\\venv\\Scripts\\python.exe -X utf8 ui_app.py", bold=True)
 
 add_header("Adım 4: Güvenlik ve Bütünlük Kuralları (Asla Çiğnenmeyecekler)", level=2)
 add_callout(
-    "1. ASLA HAM DOSYA SİLMEYİN: Redundant veya eski ara çıktıları silmek yerine daima '_arsiv/' altına taşıyın.\n"
+    "1. FİZİKSEL ÇİFT VEKTÖR DB AYRIMI: vector_db/ (insaat_mevzuat) %100 saf bağlayıcı kural/şartname havuzudur; yüklenici yazışmaları YALNIZCA vector_db_yazismalar/ (proje_yazismalari) + data/project_graph.db'ye yazılır.\n"
     "2. DATE_ORDER='DMY' KURALI: dateparser çağrılarında DMY zorunludur; Türkçe tarihlerin gün/ay takası sessiz kronoloji bozulması yaratır.\n"
-    "3. ONAY OLMADAN DURUM KAPATMA YASAĞI: project_db.transition_claim_state() yalnızca confirmed_by_human=1 ve geçerli state geçişleriyle çalışır.\n"
+    "3. ONAY OLMADAN DURUM KAPATMA YASAĞI: project_db.update_state() yalnızca confirmed_by_human=True ve geçerli state geçişleriyle uygulanır.\n"
     "4. KELİME SINIRLARI VE SAYFA ETİKETLERİ: '## --- Sayfa X ---' başlıklarını korumaya devam edin; verifier ve char_interval buna bağımlıdır.\n"
     "5. PYTHON ÇALIŞTIRMA KURALI: Komutları daima '.\\venv\\Scripts\\python.exe -X utf8' ile çalıştırın.",
     prefix="TEMEL MİMARİ İLKELER:",

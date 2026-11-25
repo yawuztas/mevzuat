@@ -155,9 +155,9 @@ def safe_llm_invoke(messages: List[Any], temperature: float = 0.1, max_retries: 
         except Exception as e:
             console.print(f"  [dim yellow]Anthropic API hatası ({e}), Google Gemini fallback hattına geçiliyor...[/dim yellow]")
 
-    # 2. Google Gemini modelleri üzerinden fallback listesi
+    # 2. Google Gemini modelleri üzerinden geçerli fallback listesi
     candidate_models = []
-    for m in [GOOGLE_MODEL_NAME, "gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-2.5-flash"]:
+    for m in [GOOGLE_MODEL_NAME, "gemini-2.5-flash", "gemini-flash-lite-latest"]:
         if m and m not in candidate_models:
             candidate_models.append(m)
 
@@ -279,8 +279,9 @@ def router_node(state: AgentState) -> Dict[str, Any]:
         "['sure_uzatimi_ve_mucbir_sebep', 'hakedis_ve_fiyat_farki', 'yeni_birim_fiyat_ve_analiz', "
         "'kabul_muayene_ve_teminat', 'tasaron_ve_alt_yuklenici', 'ceza_ve_fesih_hukuk', "
         "'sinyalizasyon_cbtc', 'cer_gucu_ve_elektrifikasyon', 'zayif_akim_ve_scada', "
-        "'havalandirma_ve_yangin_tvs', 'asansor_ve_yuruyen_merdiven', 'tunel_ve_kazilar', "
-        "'demiryolu_ustyapi_ve_ray', 'istasyon_kaba_ince', 'sozlesme_ve_idari', 'genel_rams_ve_emniyet']"
+        "'havalandirma_ve_yangin_tvs', 'asansor_ve_yuruyen_merdiven', 'genel_elektromekanik', "
+        "'tunel_ve_kazilar', 'demiryolu_ustyapi_ve_ray', 'istasyon_kaba_ince', 'genel_insaat', "
+        "'sozlesme_ve_idari', 'genel_rams_ve_emniyet']"
     )
 
     evrak_kesiti = get_adaptive_context(doc_text, max_chars=35000)
@@ -600,8 +601,9 @@ def citation_verifier_node(state: AgentState) -> Dict[str, Any]:
     #    (Adım 2 düzeltmesi: standart kodu alternatifi KÜÇÜK/BÜYÜK harfe DUYARLI —
     #    Türkçe "en az 210 gün" ifadesi sahte "EN 210" atfı sanılmasın.)
     regex_citations = set(re.findall(
-        r'(?:(?:4734|4735)\s*say[ıi]l[ıi]\s*(?:Kanun[a-z]*\s*)?(?:Madde\s*\d+|Ek\s*Madde\s*\d+|Ge[çc][iı]c[iı]\s*Madde\s*\d+)|'
-        r'(?:YİGŞ|YIGS)\s*(?:Madde\s*\d+)|'
+        r'(?:(?:4734|4735|6098|4686)\s*say[ıi]l[ıi]\s*(?:(?:Kamu\s+[İI]hale(?:\s+S[öo]zle[şs]meleri)?|T[üu]rk\s+Bor[çc]lar|Milletleraras[ıi]\s+Tahkim)\s+)?(?:Kanun[a-z\'\u2019]*\s*)?(?:Madde\s*\d+|Ek\s*Madde\s*\d+|Ge[çc][iı]c[iı]\s*Madde\s*\d+)|'
+        r'(?:Yap[ıi]m\s+[İI][şs]leri\s+Genel\s+[ŞS]artnamesi(?:\'[a-z]+)?|YİGŞ|YIGS)\s*(?:Madde\s*\d+)|'
+        r'(?:Dan[ıi][şs]manl[ıi]k\s+Hizmet\s+[İI][şs]leri\s+Genel\s+[ŞS]artnamesi(?:\'[a-z]+)?|DHİGŞ|DHIGS)\s*(?:Madde\s*\d+)|'
         r'Madde\s+\d+|Ge[çc][iı]c[iı]\s+Madde\s+\d+|Ek\s+Madde\s+\d+|'
         r'Poz\s+\d+[\.\d]*)',
         final_report,
@@ -616,7 +618,7 @@ def citation_verifier_node(state: AgentState) -> Dict[str, Any]:
     for exp in expert_analyses.values():
         retrieved_chunks.extend(exp.get("retrieved_chunks", []))
 
-    # 3. İndeks veritabanını al (in-memory doğrulama için)
+    # 3. İndeks veritabanını al (in-memory doğrulama — yalnızca Normatif DB `vector_db`)
     col = get_chroma_collection()
     bm25_info = get_or_build_bm25_index(col)
     all_docs = bm25_info.get("documents", [])
@@ -639,15 +641,27 @@ def citation_verifier_node(state: AgentState) -> Dict[str, Any]:
 
     for clause in found_clauses:
         clause_clean = clause.strip()
-        # Kanun / Yönetmelik öneki ve ana maddeyi ayır (Türkçe çekim eklerini tolere et)
-        m_parts = re.match(r"(?:(4734|4735)\s*(?:sayılı\s*Kanun[a-z]*\s*)?|(YİGŞ|YIGS)\s*)?(.*)", clause_clean, re.IGNORECASE)
+        # Kanun / Yönetmelik öneki ve ana maddeyi ayır (tam kanun/şartname adlarını da tanır)
+        m_parts = re.match(
+            r"(?:(4734|4735|6098|4686)\s*(?:say[ıi]l[ıi]\s*(?:(?:Kamu\s+[İI]hale(?:\s+S[öo]zle[şs]meleri)?|T[üu]rk\s+Bor[çc]lar|Milletleraras[ıi]\s+Tahkim)\s+)?(?:Kanun[a-z\'\u2019]*\s*)?)?|"
+            r"(Yap[ıi]m\s+[İI][şs]leri\s+Genel\s+[ŞS]artnamesi(?:\'[a-z]+)?|YİGŞ|YIGS)\s*|"
+            r"(Dan[ıi][şs]manl[ıi]k\s+Hizmet\s+[İI][şs]leri\s+Genel\s+[ŞS]artnamesi(?:\'[a-z]+)?|DHİGŞ|DHIGS)\s*)?(.*)",
+            clause_clean,
+            re.IGNORECASE,
+        )
         law_filter = None
         core_clause = clause_clean
         if m_parts:
-            law_val = m_parts.group(1) or m_parts.group(2)
-            rem = m_parts.group(3).strip()
-            if law_val:
-                law_filter = "4734" if "4734" in law_val else ("4735" if "4735" in law_val else "yigs")
+            num_law = m_parts.group(1)
+            yigs_law = m_parts.group(2)
+            dhigs_law = m_parts.group(3)
+            rem = (m_parts.group(4) or "").strip()
+            if num_law:
+                law_filter = num_law
+            elif yigs_law:
+                law_filter = "yigs"
+            elif dhigs_law:
+                law_filter = "danismanlik"
             if rem:
                 core_clause = rem
 
@@ -704,7 +718,9 @@ def citation_verifier_node(state: AgentState) -> Dict[str, Any]:
             continue
 
         # Öncelik 2: Genel veritabanında var mı? (YALNIZCA normatif belgeler, ilgili proje ve uyumlu ihale türü taranır)
+        # Boş standart form şablonları yerine esas kanun/yönetmelik/şartname belgeleri önceliklendirilir.
         found_in_db = None
+        fallback_form_in_db = None
         for doc, meta in zip(all_docs, all_metas):
             if meta.get("doc_role") == "correspondence_history":
                 continue
@@ -731,8 +747,15 @@ def citation_verifier_node(state: AgentState) -> Dict[str, Any]:
                     break
                 continue
             if re.search(r"(?<!\w)" + re.escape(core_low) + r"(?!\w)", doc_low) or re.search(r"(?<!\w)" + re.escape(core_low) + r"(?!\w)", t_low):
+                if meta.get("doc_type") == "standart_form_sablonu":
+                    if fallback_form_in_db is None:
+                        fallback_form_in_db = meta
+                    continue
                 found_in_db = meta
                 break
+
+        if found_in_db is None:
+            found_in_db = fallback_form_in_db
 
         if found_in_db:
             src = found_in_db.get("source_file", "Veritabanı Dokümanı")
@@ -833,10 +856,17 @@ def run_audit(file_path: str, project_id: Optional[str] = None):
 
 
 if __name__ == "__main__":
+    import argparse
+
     console.rule("[bold cyan]İnşaat Hakediş ve Mevzuat Denetim Ajanları (2_agents_graph.py)[/bold cyan]")
 
-    if len(sys.argv) > 1:
-        target_file = sys.argv[1]
+    ap = argparse.ArgumentParser(description="6 Düğümlü Çoklu Ajan Denetim Akışı (2_agents_graph.py)")
+    ap.add_argument("file_path", nargs="?", default=None, help="Denetlenecek yüklenici evrakı (.pdf/.docx/.md/.txt)")
+    ap.add_argument("--project", default=None, help="Hedef proje ID'si (ör. ikitelli_atakoy_metro, kirazli_halkali_metro)")
+    cli_args = ap.parse_args()
+
+    if cli_args.file_path:
+        target_file = cli_args.file_path
     else:
         files = [f for f in YUKLENICI_DIR.rglob("*.*") if f.is_file() and not f.name.endswith(".md")]
         if not files:
@@ -846,7 +876,7 @@ if __name__ == "__main__":
             console.print(f"[dim]Varsayılan olarak '{files[0].name}' dosyası inceleniyor.[/dim]")
         else:
             console.print(f"[bold red]![/bold red] [yellow]{YUKLENICI_DIR}[/yellow] klasöründe incelenecek evrak bulunamadı.")
-            console.print("[dim]Kullanım: python 2_agents_graph.py <dosya_yolu>[/dim]")
+            console.print("[dim]Kullanım: python 2_agents_graph.py <dosya_yolu> [--project <proje_id>][/dim]")
             sys.exit(0)
 
-    run_audit(target_file)
+    run_audit(target_file, project_id=cli_args.project)

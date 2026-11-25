@@ -128,7 +128,13 @@ window.renderCorrespondenceGraph = function(containerId, elementsJson) {
   const elements = typeof elementsJson === 'string' ? JSON.parse(elementsJson) : elementsJson;
   if (window._cyInstance) {
     window._cyInstance.destroy();
+    window._cyInstance = null;
   }
+  if (!elements || elements.length === 0) {
+    el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:24px;text-align:center;color:#64748B;font-size:0.9rem;"><div><div style="font-weight:600;color:#102C57;margin-bottom:6px;">Yazışma Havuzu Şu An Boş (0 Kayıt)</div><div>Seçili proje için henüz yüklenici / idare yazışması indekslenmedi.<br/>Gerçek yazışmalar eklendiğinde <code>ingest_history.py --project &lt;proje&gt;</code> ile soy ağacı otomatik çizilir.</div></div></div>';
+    return;
+  }
+  el.innerHTML = '';
   window._cyInstance = cytoscape({
     container: el,
     elements: elements,
@@ -251,7 +257,10 @@ def main_page() -> None:
             with ui.column().classes("gap-0"):
                 ui.label("InsaatAudit — Mevzuat, Şartname ve Yazışma Denetim Stüdyosu").classes("text-lg font-bold tracking-tight")
                 ui.label("Katmanlı Vektör Hafıza · SQLite Yazışma Soy Ağacı · 6 Düğümlü LangGraph Denetimi").classes("text-xs text-slate-300")
-        header_badge = ui.badge(f"ChromaDB Aktif: {initial_inv['total_vectors']:,} Vektör", color="teal").classes("text-xs px-3 py-1")
+        header_badge = ui.badge(
+            f"Normatif DB: {initial_inv['normative_vectors']:,} · Yazışma DB: {initial_inv['correspondence_vectors']:,}",
+            color="teal",
+        ).classes("text-xs px-3 py-1")
 
     with ui.column().classes("w-full max-w-[1440px] mx-auto px-5 py-4 gap-4"):
         with ui.tabs().classes("w-full bg-white border border-slate-200 rounded-lg px-2 text-slate-700") as tabs:
@@ -271,8 +280,8 @@ def main_page() -> None:
 
                 with ui.row().classes("w-full gap-3"):
                     with ui.column().classes("surface-panel p-4 flex-1 min-w-[180px]"):
-                        ui.label("Toplam Vektör Parçası").classes("text-xs font-medium text-slate-500")
-                        lbl_tot = ui.label(f"{initial_inv['total_vectors']:,}").classes("metric-val")
+                        ui.label("Normatif DB (vector_db)").classes("text-xs font-medium text-slate-500")
+                        lbl_tot = ui.label(f"{initial_inv['normative_vectors']:,}").classes("metric-val")
                     with ui.column().classes("surface-panel p-4 flex-1 min-w-[180px]"):
                         ui.label("Katman 1 — Genel Mevzuat & Norm").classes("text-xs font-medium text-slate-500")
                         lbl_l1 = ui.label(f"{initial_inv['layer_counts'].get('global', 0):,}").classes("metric-val")
@@ -280,8 +289,8 @@ def main_page() -> None:
                         ui.label("Katman 2 — Proje Sözleşme/Şartname").classes("text-xs font-medium text-slate-500")
                         lbl_l2 = ui.label(f"{initial_inv['layer_counts'].get('project_normative', 0):,}").classes("metric-val")
                     with ui.column().classes("surface-panel p-4 flex-1 min-w-[180px]"):
-                        ui.label("Katman 3 — Yazışma Geçmişi").classes("text-xs font-medium text-slate-500")
-                        lbl_l3 = ui.label(f"{initial_inv['layer_counts'].get('correspondence_history', 0):,}").classes("metric-val")
+                        ui.label("Katman 3 — Ayrı Yazışma DB (vector_db_yazismalar)").classes("text-xs font-medium text-slate-500")
+                        lbl_l3 = ui.label(f"{initial_inv['correspondence_vectors']:,}").classes("metric-val")
 
                 with ui.row().classes("w-full gap-4 items-stretch"):
                     with ui.column().classes("surface-panel p-4 flex-[1.35] min-w-0 gap-2"):
@@ -340,7 +349,12 @@ def main_page() -> None:
                         ui.label("Canlı Hibrit Hafıza Sorgusu (BM25 + BGE-M3 + Reranker)").classes("text-base font-semibold text-[#102C57]")
                         with ui.row().classes("w-full items-center gap-2"):
                             q_input = ui.input("Sorgu (ör. YİGŞ Madde 29 gecikme cezası veya 2013/5217 Pn formülü)").classes("flex-1").props("outlined dense")
-                            q_proj = ui.select(["global"] + known_projects, value="ikitelli_atakoy_metro" if "ikitelli_atakoy_metro" in known_projects else "global", label="Kapsam").props("outlined dense").classes("w-48")
+                            q_store = ui.select(
+                                {"normative_rule": "Normatif DB", "correspondence_history": "Yazışma DB"},
+                                value="normative_rule",
+                                label="Veritabanı",
+                            ).props("outlined dense").classes("w-36")
+                            q_proj = ui.select(["global"] + known_projects, value="ikitelli_atakoy_metro" if "ikitelli_atakoy_metro" in known_projects else "global", label="Kapsam").props("outlined dense").classes("w-44")
                             q_btn = ui.button("Ara", icon="search").props("unelevated color=primary")
                         search_results_box = ui.scroll_area().classes("w-full h-[240px] border border-slate-100 rounded bg-slate-50 p-3")
 
@@ -351,9 +365,10 @@ def main_page() -> None:
                         return
                     sf = meta["source_file"]
                     pid = meta["project_id"]
+                    drole = meta.get("doc_role") or ("correspondence_history" if meta.get("layer") == "Katman 3" else "normative_rule")
                     chunk_header.text = sf
                     chunk_sub.text = f"{meta.get('layer', '')} · Proje: {pid} · Tür: {meta.get('doc_type', '')}"
-                    chunks = get_document_chunks(pid, sf, limit=60)
+                    chunks = get_document_chunks(pid, sf, limit=60, doc_role=drole)
                     chunk_scroll.clear()
                     with chunk_scroll:
                         if not chunks:
@@ -384,7 +399,7 @@ def main_page() -> None:
                         ui.spinner(size="md")
                         ui.label("BGE-M3 + BM25 + Reranker çalışıyor...").classes("text-xs text-slate-500")
                     try:
-                        hits = await run.io_bound(semantic_search_memory, q_txt, q_proj.value, None, "normative_rule", 5)
+                        hits = await run.io_bound(semantic_search_memory, q_txt, q_proj.value, None, q_store.value, 5)
                     finally:
                         q_btn.enable()
                     search_results_box.clear()
@@ -406,11 +421,11 @@ def main_page() -> None:
                 def refresh_memory_tab() -> None:
                     inv = get_memory_inventory_and_tree()
                     inv_state["data"] = inv
-                    lbl_tot.text = f"{inv['total_vectors']:,}"
+                    lbl_tot.text = f"{inv['normative_vectors']:,}"
                     lbl_l1.text = f"{inv['layer_counts'].get('global', 0):,}"
                     lbl_l2.text = f"{inv['layer_counts'].get('project_normative', 0):,}"
-                    lbl_l3.text = f"{inv['layer_counts'].get('correspondence_history', 0):,}"
-                    header_badge.text = f"ChromaDB Aktif: {inv['total_vectors']:,} Vektör"
+                    lbl_l3.text = f"{inv['correspondence_vectors']:,}"
+                    header_badge.text = f"Normatif DB: {inv['normative_vectors']:,} · Yazışma DB: {inv['correspondence_vectors']:,}"
                     tree_chart.options["series"][0]["data"] = [inv["tree"]]
                     tree_chart.update()
                     top_subs = list(inv["subsystem_counts"].items())[:12]

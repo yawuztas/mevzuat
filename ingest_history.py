@@ -63,7 +63,11 @@ from utils.project_db import (
     resolve_link,
     link_exists,
 )
-from utils.retriever import get_chroma_collection, get_embedding_model, detect_project_procurement_type
+from utils.retriever import (
+    get_correspondence_collection,
+    get_embedding_model,
+    detect_project_procurement_type,
+)
 from utils.document_parser import parse_any_document
 from utils.standards import extract_standard_refs
 
@@ -221,42 +225,53 @@ def backfill_unresolved(conn, project_id: str) -> int:
     return baglanan
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Yazışma tarihçesi indeksleyici (Adım 3)")
-    ap.add_argument("--project", required=True, help="proje_id (ör. ikitelli_atakoy_metro)")
-    ap.add_argument("--use-llm", action="store_true", help="instructor + langextract zenginleştirmesi")
-    ap.add_argument("--dry-run", action="store_true", help="yazma yapmadan raporlar (DB/Chroma/embedding açmaz)")
-    ap.add_argument("--limit", type=int, default=0, help="en fazla N belge işle (0=tümü)")
-    ap.add_argument("--include-dir", action="append", default=[],
-                    help="ek taranacak klasör (ör. TAHKİM — pilot için kontrollü)")
-    args = ap.parse_args()
+def ingest_project_history(
+    project_id: str,
+    *,
+    project_dir: Optional[Path] = None,
+    history_root_dir: Optional[Path] = None,
+    db_path: Optional[Path] = None,
+    chroma_dir: Optional[Path] = None,
+    use_llm: bool = False,
+    dry_run: bool = False,
+    limit: int = 0,
+    include_dirs: Optional[List[str]] = None,
+) -> dict:
+    """
+    Bir projenin yazışma klasörlerini tarar; Kimlik Kartlarını SQLite (`project_graph.db`) ve
+    fiziksel olarak ayrı yazışma ChromaDB'sine (`vector_db_yazismalar/proje_yazismalari`) yazar.
+    Normatif veritabanına (`vector_db/insaat_mevzuat`) ASLA dokunmaz.
+    """
+    root_dir = Path(history_root_dir) if history_root_dir else YUKLENICI_TALEPLERI_DIR
+    proj_dir = Path(project_dir) if project_dir else (root_dir / project_id)
+    if not proj_dir.exists():
+        raise FileNotFoundError(f"Proje klasörü yok: {proj_dir}")
 
-    project_dir = YUKLENICI_TALEPLERI_DIR / args.project
-    if not project_dir.exists():
-        console.print(f"[bold red]![/bold red] Proje klasörü yok: {project_dir}")
-        sys.exit(1)
-    proc_type = detect_project_procurement_type(args.project)
-    console.rule(f"[bold cyan]Yazışma Tarihçesi İndeksleme — {args.project}[/bold cyan]")
-    console.print(f"İhale türü: [yellow]{proc_type}[/yellow] | LLM: {'AÇIK' if args.use_llm else 'kapalı'} | "
-                  f"{'DRY-RUN' if args.dry_run else 'GERÇEK'} | limit: {args.limit or 'tümü'}")
+    proc_type = detect_project_procurement_type(project_id)
+    console.rule(f"[bold cyan]Yazışma Tarihçesi İndeksleme — {project_id}[/bold cyan]")
+    console.print(
+        f"İhale türü: [yellow]{proc_type}[/yellow] | LLM: {'AÇIK' if use_llm else 'kapalı'} | "
+        f"{'DRY-RUN' if dry_run else 'GERÇEK'} | limit: {limit or 'tümü'} | "
+        f"Vektör DB: [cyan]{chroma_dir or 'vector_db_yazismalar (proje_yazismalari)'}[/cyan]"
+    )
 
-    dosyalar = collect_files(project_dir, args.include_dir)
-    if args.limit:
-        dosyalar = dosyalar[: args.limit]
+    dosyalar = collect_files(proj_dir, list(include_dirs or []))
+    if limit:
+        dosyalar = dosyalar[:limit]
     if not dosyalar:
         console.print("[yellow]Taranacak yazışma bulunamadı.[/yellow]")
-        return
+        return {"processed": 0, "skipped": 0, "chroma_added": 0, "resolved_pass1": 0, "resolved_pass2": 0}
     console.print(f"[green]✔[/green] {len(dosyalar)} belge sıraya alındı (kronolojik klasör sırası).")
 
-    conn = connect()  # data/project_graph.db (dry-run'da okuma amaçlı, yazma yok)
+    conn = connect(db_path) if db_path else connect()
     col = None
     emb = None
 
-    islenen, atlanan, chroma_eklenen, ilk_cozulen = 0, 0, 0, 0
+    islenen, atlanan, chroma_eklenen, ilk_cozulen, baglanan = 0, 0, 0, 0, 0
     try:
         for i, fp in enumerate(dosyalar, 1):
             try:
-                rel = str(fp.relative_to(YUKLENICI_TALEPLERI_DIR))
+                rel = str(fp.resolve().relative_to(root_dir.resolve()))
             except ValueError:
                 rel = str(fp)
             # Klasör -> rol/tip ipucu (dosya yolunun ilk yazışma klasöründen)
@@ -265,10 +280,10 @@ def main():
                 if f"/{klasor}/" in f"/{rel}/".replace("\\", "/").lower() or klasor in str(fp.parent).lower():
                     role_hint, doc_type_hint = rl, dt
                     break
-            default_year = folder_year(fp, project_dir)
+            default_year = folder_year(fp, proj_dir)
 
             # --- Artımlı kontrol: kanonik md + sha aynıysa atla ---
-            onceki = find_by_file_path(conn, args.project, rel)
+            onceki = find_by_file_path(conn, project_id, rel)
             md = None
             if fp.suffix.lower() not in PARSABLE_EXT:
                 md = canonical_markdown(fp)
@@ -277,9 +292,9 @@ def main():
                 if kanonik.exists():
                     md = kanonik.read_text(encoding="utf-8", errors="ignore")
 
-            if md is not None and onceki and onceki.get("doc_sha256") == sha256_text(md) and not args.dry_run:
+            if md is not None and onceki and onceki.get("doc_sha256") == sha256_text(md) and not dry_run:
                 if col is None:
-                    col = get_chroma_collection()
+                    col = get_correspondence_collection(db_dir=chroma_dir)
                 var = col.get(where={"sqlite_doc_id": onceki["doc_id"]}, limit=1)
                 if var.get("ids"):
                     atlanan += 1
@@ -291,11 +306,11 @@ def main():
             if md is None:
                 md = canonical_markdown(fp)
             sha = sha256_text(md)
-            doc_id = f"{args.project}::{sha[:24]}"
+            doc_id = f"{project_id}::{sha[:24]}"
 
-            if onceki and onceki.get("doc_sha256") == sha and not args.dry_run:
+            if onceki and onceki.get("doc_sha256") == sha and not dry_run:
                 if col is None:
-                    col = get_chroma_collection()
+                    col = get_correspondence_collection(db_dir=chroma_dir)
                 var = col.get(where={"sqlite_doc_id": doc_id}, limit=1)
                 if var.get("ids"):
                     atlanan += 1
@@ -305,8 +320,8 @@ def main():
             # --- Kimlik Kartı ---
             sonuc = extract_identity_card(
                 md, filename=fp.name, rel_path=rel, doc_sha256=sha, doc_id=doc_id,
-                project_id=args.project, doc_type=doc_type_hint,
-                sender_role_hint=role_hint, default_year=default_year, use_llm=args.use_llm,
+                project_id=project_id, doc_type=doc_type_hint,
+                sender_role_hint=role_hint, default_year=default_year, use_llm=use_llm,
             )
             card = sonuc["card"]
             for h in sonuc["llm_errors"]:
@@ -314,12 +329,12 @@ def main():
             console.print(f"  Tarih: {card.get('doc_date')} | Sayı: {card.get('doc_no')} | "
                           f"Rol: {card.get('sender_role')} | Durum: {card.get('review_status')} | "
                           f"Güven: {card.get('extraction_confidence')} | İlgi ref: {sonuc['ilgi_refs']}")
-            if args.dry_run:
+            if dry_run:
                 islenen += 1
                 continue
 
             if col is None:
-                col = get_chroma_collection()
+                col = get_correspondence_collection(db_dir=chroma_dir)
 
             # Dosya güncellendiyse eski doc_id kalıntılarını temizle
             if onceki and onceki["doc_id"] != doc_id:
@@ -352,7 +367,7 @@ def main():
             ilgi_span = next((s for s in sonuc["spans"] if s.get("field") == "ilgi_raw"), None)
             ilk_cozulen += resolve_refs_two_pass(
                 conn,
-                args.project,
+                project_id,
                 doc_id,
                 sonuc["ilgi_refs"],
                 ilgi_raw=card.get("ilgi_raw"),
@@ -360,14 +375,14 @@ def main():
                 default_year=default_year,
             )
 
-            # --- ChromaDB: doc_role="correspondence_history" İZOLASYONU ---
+            # --- Yazışma ChromaDB (`vector_db_yazismalar/proje_yazismalari`) — FİZİKSEL İZOLASYON ---
             if emb is None:
                 emb = get_embedding_model()
             chunks = []
             parcalar = ing1.split_markdown_into_legal_chunks(
                 markdown_text=md, filename=fp.name, domain="idari",
-                scope="project", project_id=args.project,
-                project_name=args.project.replace("_", " ").title(),
+                scope="project", project_id=project_id,
+                project_name=project_id.replace("_", " ").title(),
                 rel_path=rel, procurement_type=proc_type, folder_subsystem=None,
             )
             for idx, ch in enumerate(parcalar):
@@ -379,7 +394,7 @@ def main():
                 m["doc_no"] = card.get("doc_no") or ""
                 m["sqlite_doc_id"] = doc_id
                 m["doc_type"] = doc_type_hint
-                ch["id"] = f"corr_{args.project}_{sha[:12]}_{uuid.uuid4().hex[:8]}"
+                ch["id"] = f"corr_{project_id}_{sha[:12]}_{uuid.uuid4().hex[:8]}"
                 chunks.append(ch)
 
             if chunks:
@@ -398,32 +413,65 @@ def main():
                     vectors = [emb.encode_queries([t])[0].tolist() for t in docs_content]
                 col.add(ids=ids, documents=docs_content, metadatas=metas, embeddings=vectors)
                 chroma_eklenen += len(chunks)
-                console.print(f"  [green]✔ ChromaDB:[/green] {len(chunks)} parça (doc_role=correspondence_history)")
+                console.print(f"  [green]✔ Yazışma ChromaDB (proje_yazismalari):[/green] {len(chunks)} parça")
 
             islenen += 1
 
-        if args.dry_run:
+        if dry_run:
             console.print(f"\n[bold yellow]DRY-RUN tamamlandı:[/bold yellow] {islenen} belge tarandı (veritabanına yazılmadı).")
-            return
+            return {"processed": islenen, "skipped": atlanan, "chroma_added": 0, "resolved_pass1": 0, "resolved_pass2": 0}
 
         # --- 2. Tur: çözülemeyen İlgi kenarlarını yeni belgelerle bağla ---
-        baglanan = backfill_unresolved(conn, args.project)
+        baglanan = backfill_unresolved(conn, project_id)
 
         console.print(
             f"\n[bold green]✔ Bitti:[/bold green] {islenen} belge işlendi, {atlanan} atlandı, "
-            f"{chroma_eklenen} ChromaDB parçası, {ilk_cozulen} 1. tur + {baglanan} 2. tur çözümlenen İlgi kenarı."
+            f"{chroma_eklenen} Yazışma ChromaDB parçası, {ilk_cozulen} 1. tur + {baglanan} 2. tur çözümlenen İlgi kenarı."
         )
-        # Özet tablo
         tbl = Table(title="Durum Dağılımı")
         tbl.add_column("Durum"); tbl.add_column("Adet")
         for row in conn.execute(
             "SELECT state, review_status, COUNT(*) c FROM documents WHERE project_id=? GROUP BY state, review_status",
-            (args.project,),
+            (project_id,),
         ):
             tbl.add_row(f"{row['state']} / {row['review_status']}", str(row["c"]))
         console.print(tbl)
+        return {
+            "processed": islenen,
+            "skipped": atlanan,
+            "chroma_added": chroma_eklenen,
+            "resolved_pass1": ilk_cozulen,
+            "resolved_pass2": baglanan,
+        }
     finally:
         conn.close()
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Yazışma tarihçesi indeksleyici (Adım 3 — Fiziksel Ayrı Yazışma DB)")
+    ap.add_argument("--project", required=True, help="proje_id (ör. ikitelli_atakoy_metro)")
+    ap.add_argument("--use-llm", action="store_true", help="instructor + langextract zenginleştirmesi")
+    ap.add_argument("--dry-run", action="store_true", help="yazma yapmadan raporlar (DB/Chroma/embedding açmaz)")
+    ap.add_argument("--limit", type=int, default=0, help="en fazla N belge işle (0=tümü)")
+    ap.add_argument("--include-dir", action="append", default=[],
+                    help="ek taranacak klasör (ör. TAHKİM — pilot için kontrollü)")
+    ap.add_argument("--db-path", default=None, help="Özel SQLite dosya yolu (varsayılan: data/project_graph.db)")
+    ap.add_argument("--chroma-dir", default=None, help="Özel Yazışma ChromaDB klasörü (varsayılan: vector_db_yazismalar)")
+    args = ap.parse_args()
+
+    try:
+        ingest_project_history(
+            args.project,
+            db_path=Path(args.db_path) if args.db_path else None,
+            chroma_dir=Path(args.chroma_dir) if args.chroma_dir else None,
+            use_llm=args.use_llm,
+            dry_run=args.dry_run,
+            limit=args.limit,
+            include_dirs=args.include_dir,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[bold red]![/bold red] {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

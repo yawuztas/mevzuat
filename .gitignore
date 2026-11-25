@@ -21,10 +21,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# 3. Yerel Vektör Veritabanı ve Önbellekler (Büyük Boyut ve SQLite Kilitleri)
+# 3. Yerel Vektör Veritabanları ve Önbellekler (Büyük Boyut ve SQLite Kilitleri)
 vector_db/chroma.sqlite3
 vector_db/*-*-*-*-*/
 vector_db/ingested_manifest.json
+vector_db_yazismalar/
+data/raporlar/_ui_yuklenenler/
 data/project_graph.db
 data/project_graph.db-*
 *.db-wal
